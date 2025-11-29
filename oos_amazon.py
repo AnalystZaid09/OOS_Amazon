@@ -159,7 +159,7 @@ st.markdown(
 st.markdown("---")
 
 # Process button
-if st.button("🚀 Process Data", type="primary", use_container_width=True):
+if st.button("🚀 Process Data", type="primary", width="stretch"):
     if business_file is None or pm_file is None or inventory_file is None:
         st.error("⚠️ Please upload all three files before processing!")
     elif no_of_days <= 0:
@@ -313,7 +313,7 @@ if st.button("🚀 Process Data", type="primary", use_container_width=True):
                 styled_df = display_df.style.map(color_doc, subset=["DOC"])
 
                 # Display the dataframe
-                st.dataframe(styled_df, use_container_width=True, height=600)
+                st.dataframe(styled_df, width="stretch", height=600)
 
                 # Download buttons
                 st.markdown("---")
@@ -331,7 +331,7 @@ if st.button("🚀 Process Data", type="primary", use_container_width=True):
                         data=csv_data,
                         file_name=f"processed_inventory_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
                         mime="text/csv",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
                 with col2:
@@ -422,7 +422,7 @@ if st.button("🚀 Process Data", type="primary", use_container_width=True):
                         data=excel_data,
                         file_name=f"processed_inventory_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
+                        width="stretch",
                     )
 
                 # Store in session state for persistence
@@ -476,7 +476,7 @@ elif "processed_data" in st.session_state:
     styled_df = display_df.style.map(color_doc, subset=["DOC"])
 
     # Display the dataframe
-    st.dataframe(styled_df, use_container_width=True, height=600)
+    st.dataframe(styled_df, width="stretch", height=600)
 
     # Download buttons
     st.markdown("---")
@@ -493,7 +493,7 @@ elif "processed_data" in st.session_state:
             data=csv_data,
             file_name=f"processed_inventory_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
 
     with col2:
@@ -582,7 +582,7 @@ elif "processed_data" in st.session_state:
             data=excel_data,
             file_name=f"processed_inventory_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
 
 # Footer
@@ -595,4 +595,6 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+
 
