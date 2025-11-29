@@ -473,7 +473,7 @@ elif "processed_data" in st.session_state:
     display_df = original[display_cols].copy()
 
     # Apply styling to DOC column
-    styled_df = display_df.style.applymap(color_doc, subset=["DOC"])
+    styled_df = display_df.style.map(color_doc, subset=["DOC"])
 
     # Display the dataframe
     st.dataframe(styled_df, use_container_width=True, height=600)
@@ -595,3 +595,4 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
