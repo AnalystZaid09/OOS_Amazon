@@ -163,6 +163,10 @@ if st.button("🚀 Process Data", type="primary", use_container_width=True):
                 st.info("📖 Reading files...")
                 original = pd.read_csv(business_file)
                 
+                # ✅ Ensure SKU in Business Report is string
+                if "SKU" in original.columns:
+                    original["SKU"] = original["SKU"].astype(str)
+                
                 # Read PM file (Excel or CSV)
                 if pm_file.name.endswith('.xlsx'):
                     pm = pd.read_excel(pm_file)
@@ -170,11 +174,18 @@ if st.button("🚀 Process Data", type="primary", use_container_width=True):
                     pm = pd.read_csv(pm_file)
                 
                 inventory = pd.read_csv(inventory_file)
-                
+
+                # ✅ Ensure first column of Inventory (SKU-like) is string
+                inventory.columns = inventory.columns.str.strip()
+                inventory.iloc[:, 0] = inventory.iloc[:, 0].astype(str)
+
                 # Process PM data - select columns C, D, E, F, G (indices 2-6)
                 pm = pm.iloc[:, 2:7]
                 pm.columns = ["Amazon Sku Name", "D", "Brand Manager", "F", "Brand"]
                 
+                # ✅ Ensure Amazon Sku Name is string
+                pm["Amazon Sku Name"] = pm["Amazon Sku Name"].astype(str)
+
                 # Merge Brand Manager
                 original = original.merge(
                     pm[["Amazon Sku Name", "Brand Manager"]],
@@ -201,7 +212,7 @@ if st.button("🚀 Process Data", type="primary", use_container_width=True):
                 col = original.pop("Brand")
                 original.insert(insert_pos, "Brand", col)
                 
-                # Strip whitespace from inventory columns
+                # Strip whitespace from inventory columns (already done above)
                 inventory.columns = inventory.columns.str.strip()
                 
                 # Add fulfillable quantity (11th column, index 10)
@@ -520,7 +531,7 @@ elif 'processed_data' in st.session_state:
         st.download_button(
             label="📥 Download as Excel (with colors)",
             data=excel_data,
-            file_name=f"processed_inventory_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            file_name=f"processed_inventory_analysis_%s.xlsx" % pd.Timestamp.now().strftime('%Y%m%d_%H%M%S'),
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
