@@ -64,6 +64,104 @@ def color_doc(val):
     except:
         return ""
 
+def create_excel_with_doc_format(df: pd.DataFrame) -> bytes:
+    """
+    Create an XLSX bytes object from df and apply DOC conditional formatting
+    matching the app's color buckets. Returns bytes.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Data"
+
+    # Write header + rows (preserve types where possible)
+    header = list(df.columns)
+    ws.append(header)
+    for row in df.itertuples(index=False, name=None):
+        ws.append(list(row))
+
+    # Find DOC column index (case-insensitive contains 'doc')
+    header_row = [cell.value for cell in ws[1]]
+    doc_idx = None
+    for idx, h in enumerate(header_row, start=1):
+        if h and "doc" in str(h).strip().lower():
+            doc_idx = idx
+            break
+
+    # Color map (same as app)
+    col_map = {
+        "dark_red": "8B0000",
+        "dark_orange": "FF8C00",
+        "dark_green": "006400",
+        "golden": "B8860B",
+        "sky": "0F52BA",
+        "saddle": "8B4513",
+        "white": "FFFFFF",
+    }
+
+    if doc_idx is not None:
+        try:
+            last_row = ws.max_row
+            col_letter = get_column_letter(doc_idx)
+            first_data_row = 2
+            rng = f"{col_letter}{first_data_row}:{col_letter}{last_row}"
+
+            rules = [
+                CellIsRule(operator='between', formula=['0','6.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_red"], end_color=col_map["dark_red"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['7','14.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_orange"], end_color=col_map["dark_orange"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['15','29.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_green"], end_color=col_map["dark_green"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['30','44.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["golden"], end_color=col_map["golden"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['45','59.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["sky"], end_color=col_map["sky"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['60','89.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["saddle"], end_color=col_map["saddle"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+            ]
+
+            for rrule in rules:
+                ws.conditional_formatting.add(rng, rrule)
+        except Exception:
+            pass
+
+    # Auto-adjust widths
+    try:
+        for col in ws.columns:
+            max_length = 0
+            column_letter = col[0].column_letter
+            for cell in col:
+                try:
+                    if cell.value and len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            ws.column_dimensions[column_letter].width = min(max_length + 2, 50)
+    except Exception:
+        pass
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out.getvalue()
+
 def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name: str = "DataTable"):
     """
     Load an Excel template (xlsx/xlsm) and ensure there's an Excel Table named `table_name`.
@@ -76,7 +174,7 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
     from openpyxl.formatting.rule import CellIsRule
     from openpyxl.styles import PatternFill, Font
 
-    wb = load_workbook(template_path)
+    wb = load_workbook(template_path, keep_vba=True)
     table_sheet = None
     table_obj = None
 
@@ -217,7 +315,6 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
             for rrule in rules:
                 target_ws.conditional_formatting.add(rng, rrule)
         except Exception:
-            # non-fatal; continue
             pass
 
     out = io.BytesIO()
@@ -539,6 +636,7 @@ if st.button("🚀 Process Data"):
                 # Excel export UI (template-first)
                 colA, colB = st.columns(2)
                 with colA:
+                    # plain CSV download
                     csv_buf = io.StringIO()
                     original.to_csv(csv_buf, index=False)
                     st.download_button(
@@ -546,6 +644,15 @@ if st.button("🚀 Process Data"):
                         data=csv_buf.getvalue(),
                         file_name=f"processed_inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                         mime="text/csv",
+                    )
+
+                    # XLSX download that looks like CSV but with DOC conditional formatting
+                    xlsx_bytes = create_excel_with_doc_format(original)
+                    st.download_button(
+                        "📥 Download CSV as Excel (DOC formatted)",
+                        data=xlsx_bytes,
+                        file_name=f"processed_inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}_DOCformatted.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
 
                 with colB:
@@ -647,6 +754,7 @@ elif "processed_data" in st.session_state:
     st.markdown("---")
     cA, cB = st.columns(2)
     with cA:
+        # plain CSV download
         csv_buf = io.StringIO()
         orig.to_csv(csv_buf, index=False)
         st.download_button(
@@ -655,6 +763,16 @@ elif "processed_data" in st.session_state:
             file_name=f"processed_inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
         )
+
+        # XLSX download that looks like CSV but with DOC conditional formatting
+        xlsx_bytes_prev = create_excel_with_doc_format(orig)
+        st.download_button(
+            "📥 Download CSV as Excel (DOC formatted)",
+            data=xlsx_bytes_prev,
+            file_name=f"processed_inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}_DOCformatted.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
     with cB:
         st.markdown("### Excel export (Template-first pivot)")
         over2 = st.button("📥 Overstock (DOC ↓) - Export Excel (previous)", key="over_prev")
