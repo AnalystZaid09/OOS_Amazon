@@ -674,15 +674,19 @@ if st.button("🚀 Process Data"):
                         brands = sorted(original["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in original.columns else []
                         selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
 
-                        # prepare export df WITH FILTERS
+                        # -------------------------------
+                        # FILTERS FOR OOS & OVERSTOCK
+                        # -------------------------------
                         df_export = original.copy()
 
                         if over:
-                            # Overstock: only DOC >= 90
-                            df_export = df_export[df_export["DOC"] >= 90]
+                            # Overstock: DOC >= 90
+                            doc_num = pd.to_numeric(df_export["DOC"], errors="coerce")
+                            df_export = df_export[doc_num >= 90]
                         elif oos:
-                            # OOS: only afn-fulfillable-quantity == 0
-                            df_export = df_export[df_export["afn-fulfillable-quantity"] == 0]
+                            # OOS: afn-fulfillable-quantity == 0
+                            qty_num = pd.to_numeric(df_export["afn-fulfillable-quantity"], errors="coerce").fillna(0)
+                            df_export = df_export[qty_num == 0]
 
                         if selected:
                             df_export = df_export[df_export["Brand"].isin(selected)].copy()
@@ -711,7 +715,13 @@ if st.button("🚀 Process Data"):
                                 st.code(template_error)
 
                         if final_bytes is None:
-                            fallback_buf = create_fallback_workbook(df_export, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", parent_col=parent_col, selected_brands=selected)
+                            fallback_buf = create_fallback_workbook(
+                                df_export,
+                                sort_desc=sort_desc,
+                                sheet_name="Overstock" if sort_desc else "OOS",
+                                parent_col=parent_col,
+                                selected_brands=selected,
+                            )
                             final_bytes = fallback_buf.getvalue()
                             st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
@@ -810,15 +820,19 @@ elif "processed_data" in st.session_state:
             brands = sorted(orig["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in orig.columns else []
             selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
 
-            # prepare export df WITH FILTERS
+            # -------------------------------
+            # FILTERS FOR PREVIOUS OOS & OVERSTOCK
+            # -------------------------------
             df_export = orig.copy()
 
             if over2:
-                # Overstock: only DOC >= 90
-                df_export = df_export[df_export["DOC"] >= 90]
+                # Overstock: DOC >= 90
+                doc_num_prev = pd.to_numeric(df_export["DOC"], errors="coerce")
+                df_export = df_export[doc_num_prev >= 90]
             elif oos2:
-                # OOS: only afn-fulfillable-quantity == 0
-                df_export = df_export[df_export["afn-fulfillable-quantity"] == 0]
+                # OOS: afn-fulfillable-quantity == 0
+                qty_num_prev = pd.to_numeric(df_export["afn-fulfillable-quantity"], errors="coerce").fillna(0)
+                df_export = df_export[qty_num_prev == 0]
 
             if selected:
                 df_export = df_export[df_export["Brand"].isin(selected)].copy()
@@ -844,7 +858,13 @@ elif "processed_data" in st.session_state:
                     st.code(traceback.format_exc())
 
             if final_bytes is None:
-                fallback_buf = create_fallback_workbook(df_export, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", parent_col=parent_col, selected_brands=selected)
+                fallback_buf = create_fallback_workbook(
+                    df_export,
+                    sort_desc=sort_desc,
+                    sheet_name="Overstock" if sort_desc else "OOS",
+                    parent_col=parent_col,
+                    selected_brands=selected,
+                )
                 final_bytes = fallback_buf.getvalue()
                 st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
