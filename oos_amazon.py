@@ -1,3 +1,4 @@
+# app.py - Full merged Streamlit app with template + safe COM pivot attempt + fallback
 import streamlit as st
 import pandas as pd
 import io
@@ -5,11 +6,13 @@ import os
 import sys
 import tempfile
 import traceback
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
+from datetime import datetime
 
 # ---------------------
-# COM helper: create_pivot_with_com (FULL - creates PivotTable, PivotChart, Slicer)
+# Optional COM helper (safe): will be used only on Windows and only if pywin32 exists.
+# Ensures COM is initialized on the current thread (fixes CoInitialize error).
 # ---------------------
 def create_pivot_with_com(xlsx_path: str,
                           data_sheet_name: str = "Overstock",
@@ -21,7 +24,6 @@ def create_pivot_with_com(xlsx_path: str,
     Returns (True, None) on success, or (False, traceback_str) on failure.
     Requires: Windows + Excel + pywin32.
     """
-    import traceback, os
     try:
         import pythoncom
         import win32com.client as win32
@@ -34,28 +36,25 @@ def create_pivot_with_com(xlsx_path: str,
     wb = None
     initialized = False
     try:
-        # Initialize COM on this thread (idempotent if already called)
-        # Use Apartment-threaded model which Excel expects.
+        # Initialize COM on this thread (Apartment threaded)
         try:
             pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
             initialized = True
         except Exception:
-            # fallback to simple CoInitialize (older pywin32 builds)
             try:
                 pythoncom.CoInitialize()
                 initialized = True
             except Exception:
-                # if both fail, continue and attempt EnsureDispatch (we'll capture failure)
                 initialized = False
 
-        # Now do the COM dispatch
+        # Dispatch Excel
         excel = win32.gencache.EnsureDispatch('Excel.Application')
         excel.Visible = False
         excel.DisplayAlerts = False
 
         wb = excel.Workbooks.Open(os.path.abspath(xlsx_path))
 
-        # find data sheet
+        # find data sheet by name or use first sheet
         ws_data = None
         for ws in wb.Worksheets:
             if ws.Name == data_sheet_name:
@@ -84,7 +83,7 @@ def create_pivot_with_com(xlsx_path: str,
         xlRowField = constants.xlRowField
         xlSum = constants.xlSum
 
-        # read headers
+        # read headers from first row
         headers = []
         first_row = ws_data.Range(ws_data.Cells(1, 1), ws_data.Cells(1, ws_data.UsedRange.Columns.Count))
         for i in range(1, first_row.Columns.Count + 1):
@@ -120,7 +119,7 @@ def create_pivot_with_com(xlsx_path: str,
             except Exception:
                 pass
 
-        # add pivot chart (best effort)
+        # Add chart (best-effort)
         try:
             chart_obj = pivot_ws.Shapes.AddChart2(201, 51, 400, 10, 600, 300)
             chart = chart_obj.Chart
@@ -135,7 +134,7 @@ def create_pivot_with_com(xlsx_path: str,
         except Exception:
             pass
 
-        # add slicer (best effort)
+        # Add slicer for Brand (best-effort)
         try:
             if brand_field:
                 slicer_cache = wb.SlicerCaches.Add(pivot_table.PivotFields(brand_field))
@@ -152,7 +151,7 @@ def create_pivot_with_com(xlsx_path: str,
 
         return True, None
 
-    except Exception as e:
+    except Exception:
         tb = traceback.format_exc()
         try:
             if wb:
@@ -167,32 +166,92 @@ def create_pivot_with_com(xlsx_path: str,
         return False, tb
 
     finally:
-        # Uninitialize COM if we initialized it here
         try:
             if initialized:
                 pythoncom.CoUninitialize()
         except Exception:
             pass
 
-
 # ---------------------
-# Helper: create workbook (pivot attempt) + apply DOC conditional formatting for both engines
+# Template filler: replaces data in a template containing a table named 'DataTable'
 # ---------------------
-def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: bool, sheet_name: str, selected_brands, parent_col):
+def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, data_sheet_name: str = "DataTable", table_name: str = "DataTable"):
     """
-    Create workbook bytes:
-    - Try programmatic pivot creation using xlsxwriter (if available).
-    - If not, create openpyxl workbook with DataTable, PivotSummary, ChartData, Chart, HowToPivot.
-    - Always apply DOC conditional formatting on exported sheets (data & pivot summary).
-    Returns (BytesIO, pivot_created_flag, pivot_error_or_none)
+    Load pivot_template.xlsx which must have a table named 'DataTable'.
+    Replace the table contents with the dataframe df and update the table reference.
+    Return BytesIO of updated workbook.
     """
+    from openpyxl.worksheet.table import Table
     from openpyxl.utils import get_column_letter
 
-    # filter & sort
+    wb = load_workbook(template_path)
+    table_sheet = None
+    table_obj = None
+
+    # search for table object by name across sheets
+    for ws in wb.worksheets:
+        for tbl in ws._tables:
+            if tbl.displayName == table_name:
+                table_sheet = ws
+                table_obj = tbl
+                break
+        if table_obj:
+            break
+
+    if table_obj is None:
+        raise RuntimeError(f"Template does not contain a table named '{table_name}'. Please create one in the template.")
+
+    # parse current ref like "A1:G10"
+    ref = table_obj.ref
+    start_cell, end_cell = ref.split(":")
+    def cell_to_rowcol(cell):
+        import re
+        m = re.match(r"([A-Z]+)(\d+)", cell)
+        if not m:
+            raise RuntimeError("Unexpected table ref format")
+        col_letters, row = m.groups()
+        col = 0
+        for ch in col_letters:
+            col = col * 26 + (ord(ch) - ord('A') + 1)
+        return int(row), col
+
+    start_row, start_col = cell_to_rowcol(start_cell)
+
+    # clear existing rows under header
+    end_row, end_col = cell_to_rowcol(end_cell)
+    for r in range(start_row + 1, end_row + 1):
+        for c in range(start_col, end_col + 1):
+            table_sheet.cell(row=r, column=c).value = None
+
+    # write header (use df.columns to be certain)
+    header = list(df.columns)
+    for idx, col_name in enumerate(header):
+        table_sheet.cell(row=start_row, column=start_col + idx, value=col_name)
+
+    # write data rows
+    for r_idx, row in enumerate(df.itertuples(index=False, name=None), start=start_row + 1):
+        for c_idx, v in enumerate(row, start=start_col):
+            table_sheet.cell(row=r_idx, column=c_idx, value=v)
+
+    # update table ref
+    new_end_row = start_row + len(df)
+    new_end_col = start_col + len(header) - 1
+    new_ref = f"{get_column_letter(start_col)}{start_row}:{get_column_letter(new_end_col)}{new_end_row}"
+    table_obj.ref = new_ref
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+# ---------------------
+# Create workbook bytes (try xlsxwriter pivot, fallback openpyxl)
+# ---------------------
+def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: bool, sheet_name: str, selected_brands, parent_col):
+    from openpyxl.utils import get_column_letter
     working = df_full[df_full["Brand"].isin(selected_brands)].copy() if selected_brands else df_full.copy()
     working = working.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
-    # Build aggregated ChartData by Brand+Parent
     if parent_col and parent_col in working.columns:
         agg = working.groupby(["Brand", parent_col], dropna=False)[["DOC", "DRR"]].sum().reset_index()
         agg["Brand_Parent"] = agg["Brand"].astype(str) + " | " + agg[parent_col].astype(str)
@@ -202,7 +261,6 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
     else:
         agg = pd.DataFrame(columns=["Brand_Parent", "DOC", "DRR"])
 
-    # color hex codes for Excel rules (without '#')
     colors = {
         "dark_red": "8B0000",
         "dark_orange": "FF8C00",
@@ -214,7 +272,7 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
         "white": "FFFFFF",
     }
 
-    # --- Try xlsxwriter route (programmatic pivot + conditional formatting) ---
+    # Try programmatic xlsxwriter route first
     try:
         import xlsxwriter
         out = io.BytesIO()
@@ -226,9 +284,9 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
             ws_data = writer.sheets[sheet_name]
             ws_chartdata = writer.sheets["ChartData"]
 
-            # Add Excel table for data (improves pivot source)
+            # Add table to data sheet if possible
             try:
-                from xlsxwriter.utility import xl_range
+                from xlsxwriter.utility import xl_range, xl_col_to_name
                 nrows = working.shape[0] + 1
                 ncols = working.shape[1]
                 table_range = xl_range(0, 0, nrows - 1, ncols - 1)
@@ -240,7 +298,6 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
             pivot_created = False
             pivot_error = None
 
-            # Attempt pivot creation using xlsxwriter pivot API if present
             try:
                 if hasattr(workbook, "add_pivot_table"):
                     rows = [{"field": "Brand"}]
@@ -265,7 +322,7 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
                 pivot_error = e_p
                 pivot_created = False
 
-            # Add a chart sheet from ChartData as visual
+            # Chart from ChartData
             try:
                 chart = workbook.add_chart({'type': 'column'})
                 rows_agg = agg.shape[0]
@@ -279,7 +336,7 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
             except Exception:
                 pass
 
-            # Apply conditional formatting to DOC column in data sheet (xlsxwriter)
+            # Conditional formatting for DOC column
             try:
                 if "DOC" in working.columns:
                     doc_col_idx = working.columns.get_loc("DOC")
@@ -311,17 +368,16 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
     except Exception as xlsx_err:
         pivot_err = xlsx_err
 
-    # --- Fallback: openpyxl (deterministic) ---
+    # Fallback openpyxl path
     try:
         wb = Workbook()
         ws_sorted = wb.active
         ws_sorted.title = sheet_name
 
-        # write sorted data
         for r in dataframe_to_rows(working, index=False, header=True):
             ws_sorted.append(r)
 
-        # apply DOC conditional formatting (by direct fills) on sorted sheet
+        # DOC fills
         try:
             if "DOC" in working.columns:
                 doc_idx = list(working.columns).index("DOC") + 1
@@ -353,7 +409,7 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
         except Exception:
             pass
 
-        # try to add a table named DataTable
+        # Add DataTable openpyxl
         try:
             from openpyxl.worksheet.table import Table, TableStyleInfo
             max_row = ws_sorted.max_row
@@ -365,12 +421,12 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
         except Exception:
             pass
 
-        # PivotSummary aggregated sheet
+        # PivotSummary
         ws_pivot = wb.create_sheet("PivotSummary")
         for r in dataframe_to_rows(agg, index=False, header=True):
             ws_pivot.append(r)
 
-        # Apply DOC formatting to PivotSummary if DOC present
+        # DOC fills on PivotSummary
         try:
             headers = [c.value for c in ws_pivot[1]]
             if "DOC" in headers:
@@ -409,12 +465,12 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
         except Exception:
             pass
 
-        # ChartData sheet
+        # ChartData
         ws_chartdata = wb.create_sheet("ChartData")
         for r in dataframe_to_rows(agg[["Brand_Parent", "DOC", "DRR"]], index=False, header=True):
             ws_chartdata.append(r)
 
-        # Create a bar chart on Chart sheet
+        # Chart
         try:
             from openpyxl.chart import BarChart, Reference
             if ws_chartdata.max_row > 1:
@@ -431,7 +487,7 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
         except Exception:
             pass
 
-        # HowToPivot sheet
+        # HowToPivot
         try:
             how = wb.create_sheet("HowToPivot")
             how.append(["How to create interactive PivotTable + Slicer in Excel (no VBA)"])
@@ -453,79 +509,52 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
         buf.seek(0)
         return buf, False, pivot_err
 
-    except Exception as fb_err:
-        raise RuntimeError(f"Both pivot attempt and fallback failed: {pivot_err}; fallback_err={fb_err}")
+    except Exception as e_fb:
+        raise RuntimeError(f"Both pivot attempt and fallback failed: {pivot_err}; fallback_err={e_fb}")
 
 # ---------------------
-# UI & existing app code (kept your original flow; only wiring changed to call COM optionally)
+# Streamlit UI + original processing logic
 # ---------------------
+st.set_page_config(page_title="OOS Amazon Analysis", page_icon="📊", layout="wide")
 
-# Page configuration
-st.set_page_config(
-    page_title="OOS Amazon Analysis",
-    page_icon="📊",
-    layout="wide",
-)
-
-# Custom CSS for colored cells
+# CSS and legend
 st.markdown(
     """
 <style>
-    .stApp {
-        max-width: 100%;
-    }
-    .doc-legend {
-        display: flex;
-        gap: 15px;
-        flex-wrap: wrap;
-        margin: 20px 0;
-    }
-    .legend-item {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .legend-box {
-        width: 30px;
-        height: 30px;
-        border: 1px solid #ddd;
-        border-radius: 4px;
-    }
+    .stApp { max-width: 100%; }
+    .doc-legend { display: flex; gap: 15px; flex-wrap: wrap; margin: 20px 0; }
+    .legend-item { display: flex; align-items: center; gap: 8px; }
+    .legend-box { width: 30px; height: 30px; border: 1px solid #ddd; border-radius: 4px; }
 </style>
-""",
-    unsafe_allow_html=True,
+""", unsafe_allow_html=True
 )
 
-# Helper function to color DOC values (returns CSS style string)
 def color_doc(val):
-    """Apply dark color based on DOC value"""
     try:
         doc = float(val)
         if 0 <= doc < 7:
-            return "background-color: #8B0000; color: white"  # Dark Red
+            return "background-color: #8B0000; color: white"
         elif 7 <= doc < 15:
-            return "background-color: #FF8C00; color: white"  # Dark Orange
+            return "background-color: #FF8C00; color: white"
         elif 15 <= doc < 30:
-            return "background-color: #006400; color: white"  # Dark Green
+            return "background-color: #006400; color: white"
         elif 30 <= doc < 45:
-            return "background-color: #B8860B; color: white"  # Dark Goldenrod (yellowish)
+            return "background-color: #B8860B; color: white"
         elif 45 <= doc < 60:
-            return "background-color: #0F52BA; color: white"  # Dark Sky Blue / Sapphire
+            return "background-color: #0F52BA; color: white"
         elif 60 <= doc < 90:
-            return "background-color: #8B4513; color: white"  # Saddle Brown
+            return "background-color: #8B4513; color: white"
         else:
             return "background-color: #222222; color: white"
     except:
         return ""
 
-# Title and description
 st.title("📊 Inventory Analysis Dashboard")
 st.markdown("Upload your files and analyze inventory with Days of Coverage (DOC) calculations")
 
-# Sidebar for configuration
+# Sidebar configuration
 with st.sidebar:
     st.header("⚙️ Configuration")
-
     st.markdown("### Number of Days for Analysis")
     no_of_days = st.number_input(
         "Enter the number of days",
@@ -534,21 +563,15 @@ with st.sidebar:
         step=1,
         help="This represents the time period for your sales data. The DRR (Daily Run Rate) will be calculated by dividing Total Order Items by this number.",
     )
-
     st.info(
         """
     **What is Number of Days?**
 
-    This is the time period covered by your sales data (e.g., 30 or 31 for monthly data).
-
     - **DRR** (Daily Run Rate) = Total Order Items ÷ Days
     - **DOC** (Days of Coverage) = Fulfillable Qty ÷ DRR
-
-    DOC tells you how many days your current inventory will last at the current sales rate.
     """
     )
 
-    # Diagnostics small button
     st.markdown("---")
     st.subheader("Diagnostics")
     if st.button("Check xlsxwriter pivot & COM support"):
@@ -559,85 +582,44 @@ with st.sidebar:
             st.write("xlsxwriter add_pivot_table available:", bool(has_pivot_api))
         except Exception as ex:
             st.write("xlsxwriter not available:", ex)
-        # COM check
         if os.name == 'nt':
             try:
-                import win32com.client as win32
+                import win32com.client as win32  # type: ignore
                 st.write("pywin32 available (win32com).")
             except Exception as ex:
                 st.write("pywin32 not available:", ex)
         else:
             st.write("COM automation only available on Windows.")
 
-# File upload section
+# File uploads
 st.header("📁 Upload Files")
-
 col1, col2, col3 = st.columns(3)
-
 with col1:
     st.subheader("Business Report")
-    business_file = st.file_uploader(
-        "Upload Business Report CSV",
-        type=["csv"],
-        key="business",
-        help="Upload the BusinessReport CSV file",
-    )
-
+    business_file = st.file_uploader("Upload Business Report CSV", type=["csv"], key="business")
 with col2:
     st.subheader("PM Data")
-    pm_file = st.file_uploader(
-        "Upload PM Excel/CSV",
-        type=["xlsx", "csv"],
-        key="pm",
-        help="Upload the PM.xlsx or converted CSV file",
-    )
-
+    pm_file = st.file_uploader("Upload PM Excel/CSV", type=["xlsx", "csv"], key="pm")
 with col3:
     st.subheader("Inventory Data")
-    inventory_file = st.file_uploader(
-        "Upload Manage Inventory CSV",
-        type=["csv"],
-        key="inventory",
-        help="Upload the Manage Inventory CSV file",
-    )
+    inventory_file = st.file_uploader("Upload Manage Inventory CSV", type=["csv"], key="inventory")
 
-# DOC Color Legend
+# DOC legend display
 st.header("🎨 DOC Color Legend")
-st.markdown(
-    """
+st.markdown("""
 <div class="doc-legend">
-    <div class="legend-item">
-        <div class="legend-box" style="background-color: #8B0000;"></div>
-        <span><b>0-7 days</b> (Critical)</span>
-    </div>
-    <div class="legend-item">
-        <div class="legend-box" style="background-color: #FF8C00;"></div>
-        <span><b>7-15 days</b> (Low)</span>
-    </div>
-    <div class="legend-item">
-        <div class="legend-box" style="background-color: #006400;"></div>
-        <span><b>15-30 days</b> (Good)</span>
-    </div>
-    <div class="legend-item">
-        <div class="legend-box" style="background-color: #B8860B;"></div>
-        <span><b>30-45 days</b> (Optimal)</span>
-    </div>
-    <div class="legend-item">
-        <div class="legend-box" style="background-color: #0F52BA;"></div>
-        <span><b>45-60 days</b> (High)</span>
-    </div>
-    <div class="legend-item">
-        <div class="legend-box" style="background-color: #8B4513;"></div>
-        <span><b>60-90 days</b> (Excess)</span>
-    </div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #8B0000;"></div><span><b>0-7 days</b> (Critical)</span></div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #FF8C00;"></div><span><b>7-15 days</b> (Low)</span></div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #006400;"></div><span><b>15-30 days</b> (Good)</span></div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #B8860B;"></div><span><b>30-45 days</b> (Optimal)</span></div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #0F52BA;"></div><span><b>45-60 days</b> (High)</span></div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #8B4513;"></div><span><b>60-90 days</b> (Excess)</span></div>
 </div>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
 st.markdown("---")
 
-# Process button (main)
+# Main processing
 if st.button("🚀 Process Data"):
     if business_file is None or pm_file is None or inventory_file is None:
         st.error("⚠️ Please upload all three files before processing!")
@@ -646,65 +628,40 @@ if st.button("🚀 Process Data"):
     else:
         with st.spinner("Processing data..."):
             try:
-                # Read files
                 st.info("📖 Reading files...")
                 original = pd.read_csv(business_file)
 
-                # Ensure SKU in Business Report is string
                 if "SKU" in original.columns:
                     original["SKU"] = original["SKU"].astype(str)
 
-                # Read PM file (Excel or CSV)
                 if pm_file.name.endswith(".xlsx"):
                     pm = pd.read_excel(pm_file)
                 else:
                     pm = pd.read_csv(pm_file)
 
                 inventory = pd.read_csv(inventory_file)
-
-                # Ensure first column of Inventory (SKU-like) is string
                 inventory.columns = inventory.columns.str.strip()
                 inventory.iloc[:, 0] = inventory.iloc[:, 0].astype(str)
 
-                # Process PM data - select columns C, D, E, F, G (indices 2-6)
+                # Process pm
                 pm = pm.iloc[:, 2:7]
                 pm.columns = ["Amazon Sku Name", "D", "Brand Manager", "F", "Brand"]
-
-                # Ensure Amazon Sku Name is string
                 pm["Amazon Sku Name"] = pm["Amazon Sku Name"].astype(str)
 
-                # Merge Brand Manager
-                original = original.merge(
-                    pm[["Amazon Sku Name", "Brand Manager"]],
-                    how="left",
-                    left_on="SKU",
-                    right_on="Amazon Sku Name",
-                )
-
-                # Insert Brand Manager column
+                original = original.merge(pm[["Amazon Sku Name", "Brand Manager"]], how="left", left_on="SKU", right_on="Amazon Sku Name")
                 if "Title" in original.columns and "Brand Manager" in original.columns:
                     insert_pos = original.columns.get_loc("Title")
                     col = original.pop("Brand Manager")
                     original.insert(insert_pos, "Brand Manager", col)
 
-                # Merge Brand
-                original = original.merge(
-                    pm[["Amazon Sku Name", "Brand"]],
-                    how="left",
-                    left_on="SKU",
-                    right_on="Amazon Sku Name",
-                )
-
-                # Insert Brand column
+                original = original.merge(pm[["Amazon Sku Name", "Brand"]], how="left", left_on="SKU", right_on="Amazon Sku Name")
                 if "Title" in original.columns and "Brand" in original.columns:
                     insert_pos = original.columns.get_loc("Title")
                     col = original.pop("Brand")
                     original.insert(insert_pos, "Brand", col)
 
-                # Strip whitespace from inventory columns (already done above)
+                # inventory mapping
                 inventory.columns = inventory.columns.str.strip()
-
-                # Add fulfillable quantity (11th column, index 10) if exists
                 if inventory.shape[1] > 10:
                     return_col = inventory.columns[10]
                     mi_map = inventory.set_index(inventory.columns[0])[return_col]
@@ -712,7 +669,6 @@ if st.button("🚀 Process Data"):
                 else:
                     original["afn-fulfillable-quantity"] = 0
 
-                # Add reserved quantity (13th column, index 12) if exists
                 if inventory.shape[1] > 12:
                     return_col_13 = inventory.columns[12]
                     mi_res_map = inventory.set_index(inventory.columns[0])[return_col_13]
@@ -720,7 +676,6 @@ if st.button("🚀 Process Data"):
                 else:
                     original["afn-reserved-quantity"] = 0
 
-                # Clean Total Order Items and calculate DRR
                 if "Total Order Items" in original.columns:
                     original["Total Order Items"] = (
                         original["Total Order Items"]
@@ -729,32 +684,19 @@ if st.button("🚀 Process Data"):
                         .str.replace(",", "", regex=False)
                         .str.replace(r"[^\d\.\-]", "", regex=True)
                     )
-                    original["Total Order Items"] = pd.to_numeric(
-                        original["Total Order Items"], errors="coerce"
-                    )
+                    original["Total Order Items"] = pd.to_numeric(original["Total Order Items"], errors="coerce")
                 else:
                     original["Total Order Items"] = 0
 
-                # Calculate DRR
                 original["DRR"] = (original["Total Order Items"] / no_of_days).round(2)
-
-                # Convert fulfillable quantity to numeric
-                original["afn-fulfillable-quantity"] = pd.to_numeric(
-                    original["afn-fulfillable-quantity"], errors="coerce"
-                )
-
-                # Calculate DOC
+                original["afn-fulfillable-quantity"] = pd.to_numeric(original["afn-fulfillable-quantity"], errors="coerce")
                 original["DOC"] = (original["afn-fulfillable-quantity"] / original["DRR"]).round(2)
-
-                # Replace inf with 0
                 original["DOC"] = original["DOC"].replace([float("inf"), float("-inf")], 0)
 
                 st.success("✅ Data processed successfully!")
 
-                # Display results
+                # Display metrics
                 st.header("📈 Processed Results")
-
-                # Show summary statistics
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Total Products", len(original))
@@ -770,7 +712,6 @@ if st.button("🚀 Process Data"):
 
                 st.markdown("---")
 
-                # Select key columns for display
                 display_cols = [
                     "(Child) ASIN",
                     "Brand",
@@ -783,28 +724,19 @@ if st.button("🚀 Process Data"):
                     "DRR",
                     "DOC",
                 ]
-
-                # Filter columns that exist
                 display_cols = [col for col in display_cols if col in original.columns]
                 display_df = original[display_cols].copy()
-
-                # Apply styling to DOC column (element-wise)
                 styled_df = display_df.style.map(color_doc, subset=["DOC"])
-
-                # Display the dataframe using container width instead of invalid width string
                 st.dataframe(styled_df, use_container_width=True, height=600)
 
-                # Download buttons
                 st.markdown("---")
-
                 col1, col2 = st.columns(2)
 
+                # CSV download
                 with col1:
-                    # Convert to CSV for download
                     csv_buffer = io.StringIO()
                     original.to_csv(csv_buffer, index=False)
                     csv_data = csv_buffer.getvalue()
-
                     st.download_button(
                         label="📥 Download as CSV",
                         data=csv_data,
@@ -812,10 +744,10 @@ if st.button("🚀 Process Data"):
                         mime="text/csv",
                     )
 
-                # ---------- Excel export block (process branch) ----------
+                # Excel export block (safe: COM -> template -> fallback)
                 with col2:
-                    # Offer Excel export that tries to create PivotTable (Brand + (Parent) ASIN)
                     try:
+                        # detect parent col
                         parent_col = None
                         for c in original.columns:
                             cle = c.lower().replace(" ", "").replace("_", "").replace("(", "").replace(")", "")
@@ -837,23 +769,33 @@ if st.button("🚀 Process Data"):
                         selected_brands = st.multiselect("Filter brands for Excel export (leave empty = all)", options=brands, default=brands)
 
                         try:
-                            buf, pivot_ok, pivot_info = create_workbook_with_brand_parent_pivot_and_doc_format(df_to_use, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", selected_brands=selected_brands, parent_col=parent_col)
+                            # create initial workbook bytes (programmatic attempt)
+                            buf, pivot_ok, pivot_info = create_workbook_with_brand_parent_pivot_and_doc_format(
+                                df_to_use,
+                                sort_desc=sort_desc,
+                                sheet_name="Overstock" if sort_desc else "OOS",
+                                selected_brands=selected_brands,
+                                parent_col=parent_col,
+                            )
                             final_bytes = buf.getvalue()
+
                             com_attempted = False
                             com_ok = False
                             com_error = None
-                            # Attempt COM only on Windows
+                            template_used = False
+                            template_error = None
+
+                            # 1) Try COM on Windows if pywin32 available
                             if os.name == "nt":
-                                # check pywin32
                                 try:
-                                    import win32com.client  # type: ignore
+                                    import importlib
+                                    importlib.import_module("win32com.client")
                                     has_pywin = True
                                 except Exception:
                                     has_pywin = False
 
                                 if has_pywin:
                                     com_attempted = True
-                                    # write to temp file and call COM helper
                                     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
                                         tmp_name = tmp.name
                                         tmp.write(final_bytes)
@@ -876,7 +818,22 @@ if st.button("🚀 Process Data"):
                                         except Exception:
                                             pass
 
-                            # deliver final_bytes to user
+                            # 2) If COM not used or failed, try the local pivot template
+                            if not com_ok:
+                                template_path = os.path.join(os.path.dirname(__file__), "pivot_template.xlsx")
+                                if os.path.exists(template_path):
+                                    try:
+                                        # create df_subset same as used in create_workbook...
+                                        df_subset = df_to_use[df_to_use["Brand"].isin(selected_brands)].copy() if selected_brands else df_to_use.copy()
+                                        df_subset = df_subset.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
+                                        tpl_buf = fill_template_and_get_bytes(template_path, df_subset, data_sheet_name="DataTable", table_name="DataTable")
+                                        final_bytes = tpl_buf.getvalue()
+                                        template_used = True
+                                    except Exception as te:
+                                        template_error = traceback.format_exc()
+                                        template_used = False
+
+                            # deliver final_bytes
                             st.download_button(
                                 label="Download Excel workbook",
                                 data=final_bytes,
@@ -884,41 +841,46 @@ if st.button("🚀 Process Data"):
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             )
 
-                            # messages about what happened
+                            # Messages
                             if com_attempted:
                                 if com_ok:
                                     st.success("✅ COM automation succeeded — PivotTable, PivotChart and Slicer added in Excel (Windows + Excel).")
                                 else:
-                                    st.warning("⚠️ COM automation failed — delivered workbook without COM pivot. See pivot attempt info below.")
+                                    st.warning("⚠️ COM attempted but failed; delivered workbook without COM pivot. See details below.")
                                     if com_error:
                                         st.code(com_error)
                             else:
-                                # no COM attempted (non-Windows or pywin32 missing)
-                                if pivot_ok:
-                                    st.success("✅ Programmatic PivotTable (xlsxwriter) created. Open workbook and use Pivot UI to filter by Brand.")
-                                else:
-                                    st.warning("⚠️ Programmatic pivot creation not possible — exported workbook contains DataTable + PivotSummary + Chart. See 'HowToPivot' sheet for manual steps.")
-                                    if pivot_info:
-                                        st.info(f"Pivot attempt info: {str(pivot_info)}")
+                                st.info("COM automation not attempted (non-Windows or pywin32 missing).")
+
+                            if template_used:
+                                st.success("✅ pivot_template.xlsx was used — the exported workbook contains a working PivotTable/PivotChart/Slicer when opened in Excel.")
+                            elif template_error:
+                                st.warning("⚠️ A pivot template was present but failed to be filled programmatically. Delivered fallback workbook; see error below.")
+                                st.code(template_error)
+                            else:
+                                if not com_ok:
+                                    if pivot_ok:
+                                        st.success("✅ Programmatic pivot created with xlsxwriter. Open workbook and use Pivot UI to filter by Brand.")
+                                    else:
+                                        st.info("⚠️ Delivered fallback workbook (DataTable + PivotSummary + HowToPivot). Use Excel to build an interactive Pivot/Slicer or provide pivot_template.xlsx for automatic insertion.")
+                                        if pivot_info:
+                                            st.info(f"Pivot attempt info: {pivot_info}")
+
                         except Exception as e:
                             st.error(f"Failed to create workbook: {e}")
                             st.exception(e)
-                # ---------- end Excel export block (process branch) ----------
 
-                # Store in session state for persistence
+                # store session
                 st.session_state["processed_data"] = original
 
             except Exception as e:
                 st.error(f"❌ An error occurred: {str(e)}")
                 st.exception(e)
 
-# Show previously processed data if available
+# Show previously processed results (if any)
 elif "processed_data" in st.session_state:
-    st.header("📈 Previously Processed Results")
-
     original = st.session_state["processed_data"]
-
-    # Show summary statistics
+    st.header("📈 Previously Processed Results")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Total Products", len(original))
@@ -933,8 +895,6 @@ elif "processed_data" in st.session_state:
         st.metric("Total Orders", f"{total_orders:,.0f}")
 
     st.markdown("---")
-
-    # Select key columns for display
     display_cols = [
         "(Child) ASIN",
         "Brand",
@@ -947,36 +907,24 @@ elif "processed_data" in st.session_state:
         "DRR",
         "DOC",
     ]
-
-    # Filter columns that exist
     display_cols = [col for col in display_cols if col in original.columns]
     display_df = original[display_cols].copy()
-
-    # Apply styling to DOC column
     styled_df = display_df.style.map(color_doc, subset=["DOC"])
-
-    # Display the dataframe
     st.dataframe(styled_df, use_container_width=True, height=600)
 
-    # Download buttons
     st.markdown("---")
-
     col1, col2 = st.columns(2)
-
     with col1:
         csv_buffer = io.StringIO()
         original.to_csv(csv_buffer, index=False)
         csv_data = csv_buffer.getvalue()
-
         st.download_button(
             label="📥 Download as CSV",
             data=csv_data,
             file_name=f"processed_inventory_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
         )
-
     with col2:
-        # Convert to Excel with conditional formatting (previous results)
         try:
             parent_col = None
             for c in original.columns:
@@ -999,14 +947,25 @@ elif "processed_data" in st.session_state:
             selected_brands = st.multiselect("Filter brands for Excel export (leave empty = all)", options=brands, default=brands)
 
             try:
-                buf, pivot_ok, pivot_info = create_workbook_with_brand_parent_pivot_and_doc_format(df_to_use, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", selected_brands=selected_brands, parent_col=parent_col)
+                buf, pivot_ok, pivot_info = create_workbook_with_brand_parent_pivot_and_doc_format(
+                    df_to_use,
+                    sort_desc=sort_desc,
+                    sheet_name="Overstock" if sort_desc else "OOS",
+                    selected_brands=selected_brands,
+                    parent_col=parent_col,
+                )
                 final_bytes = buf.getvalue()
+
                 com_attempted = False
                 com_ok = False
                 com_error = None
+                template_used = False
+                template_error = None
+
                 if os.name == "nt":
                     try:
-                        import win32com.client
+                        import importlib
+                        importlib.import_module("win32com.client")
                         has_pywin = True
                     except Exception:
                         has_pywin = False
@@ -1019,9 +978,9 @@ elif "processed_data" in st.session_state:
                         try:
                             ok, com_tb = create_pivot_with_com(tmp_name, data_sheet_name="Overstock" if sort_desc else "OOS", table_name="DataTable", pivot_sheet_name="PivotTable", parent_field_hint="(Parent) ASIN")
                             if ok:
+                                com_ok = True
                                 with open(tmp_name, "rb") as f:
                                     final_bytes = f.read()
-                                com_ok = True
                             else:
                                 com_ok = False
                                 com_error = com_tb
@@ -1034,6 +993,19 @@ elif "processed_data" in st.session_state:
                             except Exception:
                                 pass
 
+                if not com_ok:
+                    template_path = os.path.join(os.path.dirname(__file__), "pivot_template.xlsx")
+                    if os.path.exists(template_path):
+                        try:
+                            df_subset = df_to_use[df_to_use["Brand"].isin(selected_brands)].copy() if selected_brands else df_to_use.copy()
+                            df_subset = df_subset.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
+                            tpl_buf = fill_template_and_get_bytes(template_path, df_subset, data_sheet_name="DataTable", table_name="DataTable")
+                            final_bytes = tpl_buf.getvalue()
+                            template_used = True
+                        except Exception as te:
+                            template_error = traceback.format_exc()
+                            template_used = False
+
                 st.download_button(
                     label="Download Excel workbook",
                     data=final_bytes,
@@ -1045,27 +1017,31 @@ elif "processed_data" in st.session_state:
                     if com_ok:
                         st.success("✅ COM automation succeeded — PivotTable, PivotChart and Slicer added in Excel (Windows + Excel).")
                     else:
-                        st.warning("⚠️ COM automation failed — delivered workbook without COM pivot. See pivot attempt info below.")
+                        st.warning("⚠️ COM attempted but failed; delivered workbook without COM pivot. See details below.")
                         if com_error:
                             st.code(com_error)
                 else:
-                    if pivot_ok:
-                        st.success("✅ Programmatic PivotTable (xlsxwriter) created. Open workbook and use Pivot UI to filter by Brand.")
-                    else:
-                        st.warning("⚠️ Programmatic pivot creation not possible — exported workbook contains DataTable + PivotSummary + Chart. See 'HowToPivot' sheet for manual steps.")
-                        if pivot_info:
-                            st.info(f"Pivot attempt info: {str(pivot_info)}")
+                    st.info("COM automation not attempted (non-Windows or pywin32 missing).")
+
+                if template_used:
+                    st.success("✅ pivot_template.xlsx was used — the exported workbook contains a working PivotTable/PivotChart/Slicer when opened in Excel.")
+                elif template_error:
+                    st.warning("⚠️ A pivot template was present but failed to be filled programmatically. Delivered fallback workbook; see error below.")
+                    st.code(template_error)
+                else:
+                    if not com_ok:
+                        if pivot_ok:
+                            st.success("✅ Programmatic pivot created with xlsxwriter. Open workbook and use Pivot UI to filter by Brand.")
+                        else:
+                            st.info("⚠️ Delivered fallback workbook (DataTable + PivotSummary + HowToPivot). Use Excel to build an interactive Pivot/Slicer or provide pivot_template.xlsx for automatic insertion.")
+                            if pivot_info:
+                                st.info(f"Pivot attempt info: {pivot_info}")
+
             except Exception as e:
                 st.error(f"Failed to create workbook: {e}")
                 st.exception(e)
 
 # Footer
 st.markdown("---")
-st.markdown(
-    """
-<div style='text-align: center; color: #666; padding: 20px;'>
-    <p>Inventory Analysis Dashboard | Built with Streamlit</p>
-</div>
-""",
-    unsafe_allow_html=True,
-)
+st.markdown("<div style='text-align: center; color: #666; padding: 20px;'><p>Inventory Analysis Dashboard | Built with Streamlit</p></div>", unsafe_allow_html=True)
+
