@@ -1,194 +1,84 @@
-# app.py - Full merged Streamlit app with template + safe COM pivot attempt + fallback
+# app.py - Streamlit-ready (Template-first pivot; fallback workbook)
 import streamlit as st
 import pandas as pd
 import io
 import os
-import sys
 import tempfile
 import traceback
+from datetime import datetime
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
-from datetime import datetime
+from openpyxl.utils import get_column_letter
 
-# ---------------------
-# Optional COM helper (safe): will be used only on Windows and only if pywin32 exists.
-# Ensures COM is initialized on the current thread (fixes CoInitialize error).
-# ---------------------
-def create_pivot_with_com(xlsx_path: str,
-                          data_sheet_name: str = "Overstock",
-                          table_name: str = "DataTable",
-                          pivot_sheet_name: str = "PivotTable",
-                          parent_field_hint: str = "(Parent) ASIN"):
+st.set_page_config(page_title="OOS Amazon Analysis", page_icon="📊", layout="wide")
+
+# -------------------------
+# CSS + DOC legend
+# -------------------------
+st.markdown(
     """
-    COM-based Pivot creation wrapper that ensures COM is initialized on the calling thread.
-    Returns (True, None) on success, or (False, traceback_str) on failure.
-    Requires: Windows + Excel + pywin32.
+<style>
+    .stApp { max-width: 100%; }
+    .doc-legend { display: flex; gap: 15px; flex-wrap: wrap; margin: 20px 0; }
+    .legend-item { display: flex; align-items: center; gap: 8px; }
+    .legend-box { width: 30px; height: 30px; border: 1px solid #ddd; border-radius: 4px; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+st.header("🎨 DOC Color Legend")
+st.markdown(
     """
+<div class="doc-legend">
+    <div class="legend-item"><div class="legend-box" style="background-color: #8B0000;"></div><span><b>0-7 days</b> (Critical)</span></div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #FF8C00;"></div><span><b>7-15 days</b> (Low)</span></div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #006400;"></div><span><b>15-30 days</b> (Good)</span></div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #B8860B;"></div><span><b>30-45 days</b> (Optimal)</span></div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #0F52BA;"></div><span><b>45-60 days</b> (High)</span></div>
+    <div class="legend-item"><div class="legend-box" style="background-color: #8B4513;"></div><span><b>60-90 days</b> (Excess)</span></div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# -------------------------
+# Helper: color_doc used for displayed DataFrame styling (returns CSS string)
+# -------------------------
+def color_doc(val):
     try:
-        import pythoncom
-        import win32com.client as win32
-        from win32com.client import constants
-    except Exception as e:
-        tb = traceback.format_exc()
-        return False, f"pywin32/pythoncom import failed: {e}\n\n{tb}"
+        doc = float(val)
+        if 0 <= doc < 7:
+            return "background-color: #8B0000; color: white"
+        elif 7 <= doc < 15:
+            return "background-color: #FF8C00; color: white"
+        elif 15 <= doc < 30:
+            return "background-color: #006400; color: white"
+        elif 30 <= doc < 45:
+            return "background-color: #B8860B; color: white"
+        elif 45 <= doc < 60:
+            return "background-color: #0F52BA; color: white"
+        elif 60 <= doc < 90:
+            return "background-color: #8B4513; color: white"
+        else:
+            return "background-color: #222222; color: white"
+    except:
+        return ""
 
-    excel = None
-    wb = None
-    initialized = False
-    try:
-        # Initialize COM on this thread (Apartment threaded)
-        try:
-            pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-            initialized = True
-        except Exception:
-            try:
-                pythoncom.CoInitialize()
-                initialized = True
-            except Exception:
-                initialized = False
-
-        # Dispatch Excel
-        excel = win32.gencache.EnsureDispatch('Excel.Application')
-        excel.Visible = False
-        excel.DisplayAlerts = False
-
-        wb = excel.Workbooks.Open(os.path.abspath(xlsx_path))
-
-        # find data sheet by name or use first sheet
-        ws_data = None
-        for ws in wb.Worksheets:
-            if ws.Name == data_sheet_name:
-                ws_data = ws
-                break
-        if ws_data is None:
-            ws_data = wb.Worksheets(1)
-
-        used = ws_data.UsedRange
-        if used is None:
-            raise RuntimeError("Could not determine UsedRange on data sheet.")
-        addr = used.Address
-        source = f"'{ws_data.Name}'!{addr}"
-
-        pivot_cache = wb.PivotCaches().Create(SourceType=1, SourceData=source)
-
-        try:
-            pivot_ws = wb.Worksheets(pivot_sheet_name)
-        except Exception:
-            pivot_ws = wb.Worksheets.Add()
-            pivot_ws.Name = pivot_sheet_name
-
-        pivot_table_name = "PivotFromCOM"
-        pivot_table = pivot_cache.CreatePivotTable(TableDestination=f"'{pivot_ws.Name}'!R3C1", TableName=pivot_table_name)
-
-        xlRowField = constants.xlRowField
-        xlSum = constants.xlSum
-
-        # read headers from first row
-        headers = []
-        first_row = ws_data.Range(ws_data.Cells(1, 1), ws_data.Cells(1, ws_data.UsedRange.Columns.Count))
-        for i in range(1, first_row.Columns.Count + 1):
-            val = first_row.Cells(1, i).Value
-            headers.append(str(val).strip() if val is not None else "")
-
-        brand_field = None
-        parent_field = None
-        for h in headers:
-            if h and h.strip().lower() == "brand":
-                brand_field = h
-            if parent_field_hint and parent_field_hint.lower() in h.lower():
-                parent_field = h
-        if not brand_field:
-            for h in headers:
-                if "brand" in h.lower():
-                    brand_field = h
-                    break
-        if not parent_field:
-            for h in headers:
-                if "parent" in h.lower():
-                    parent_field = h
-                    break
-
-        if brand_field:
-            pivot_table.PivotFields(brand_field).Orientation = xlRowField
-        if parent_field:
-            pivot_table.PivotFields(parent_field).Orientation = xlRowField
-
-        for field in ("DOC", "DRR"):
-            try:
-                pivot_table.AddDataField(pivot_table.PivotFields(field), f"Sum of {field}", xlSum)
-            except Exception:
-                pass
-
-        # Add chart (best-effort)
-        try:
-            chart_obj = pivot_ws.Shapes.AddChart2(201, 51, 400, 10, 600, 300)
-            chart = chart_obj.Chart
-            try:
-                chart.SetSourceData(pivot_table.TableRange2)
-            except Exception:
-                pass
-            try:
-                chart.ChartTitle.Text = "Sum DOC and DRR by Brand + Parent"
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        # Add slicer for Brand (best-effort)
-        try:
-            if brand_field:
-                slicer_cache = wb.SlicerCaches.Add(pivot_table.PivotFields(brand_field))
-                slicer_cache.Slicers.Add(pivot_ws, Name=f"Slicer_{brand_field}", Caption=brand_field, Left=10, Top=10, Width=140, Height=200)
-        except Exception:
-            pass
-
-        wb.Save()
-        wb.Close(SaveChanges=True)
-        try:
-            excel.Quit()
-        except Exception:
-            pass
-
-        return True, None
-
-    except Exception:
-        tb = traceback.format_exc()
-        try:
-            if wb:
-                wb.Close(SaveChanges=False)
-        except Exception:
-            pass
-        try:
-            if excel:
-                excel.Quit()
-        except Exception:
-            pass
-        return False, tb
-
-    finally:
-        try:
-            if initialized:
-                pythoncom.CoUninitialize()
-        except Exception:
-            pass
-
-# ---------------------
-# Template filler: replaces data in a template containing a table named 'DataTable'
-# ---------------------
-def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, data_sheet_name: str = "DataTable", table_name: str = "DataTable"):
+# -------------------------
+# Helper: fill a pre-built pivot template (must contain a Table named DataTable)
+# -------------------------
+def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name: str = "DataTable"):
     """
-    Load pivot_template.xlsx which must have a table named 'DataTable'.
-    Replace the table contents with the dataframe df and update the table reference.
-    Return BytesIO of updated workbook.
+    Load template_path (containing a table named table_name), replace that table's contents with df,
+    update table reference, and return BytesIO of the modified workbook.
     """
     from openpyxl.worksheet.table import Table
-    from openpyxl.utils import get_column_letter
-
     wb = load_workbook(template_path)
     table_sheet = None
     table_obj = None
 
-    # search for table object by name across sheets
+    # find the table object
     for ws in wb.worksheets:
         for tbl in ws._tables:
             if tbl.displayName == table_name:
@@ -199,7 +89,7 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, data_sheet
             break
 
     if table_obj is None:
-        raise RuntimeError(f"Template does not contain a table named '{table_name}'. Please create one in the template.")
+        raise RuntimeError(f"Template does not contain a table named '{table_name}'. Please create it in Excel (see instructions).")
 
     # parse current ref like "A1:G10"
     ref = table_obj.ref
@@ -223,7 +113,7 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, data_sheet
         for c in range(start_col, end_col + 1):
             table_sheet.cell(row=r, column=c).value = None
 
-    # write header (use df.columns to be certain)
+    # write header
     header = list(df.columns)
     for idx, col_name in enumerate(header):
         table_sheet.cell(row=start_row, column=start_col + idx, value=col_name)
@@ -244,14 +134,35 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, data_sheet
     out.seek(0)
     return out
 
-# ---------------------
-# Create workbook bytes (try xlsxwriter pivot, fallback openpyxl)
-# ---------------------
-def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: bool, sheet_name: str, selected_brands, parent_col):
-    from openpyxl.utils import get_column_letter
-    working = df_full[df_full["Brand"].isin(selected_brands)].copy() if selected_brands else df_full.copy()
+# -------------------------
+# Helper: fallback workbook generator using openpyxl (DataTable + PivotSummary + ChartData + Chart + HowToPivot)
+# -------------------------
+def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str, parent_col: str = None, selected_brands = None):
+    """
+    Create fallback workbook bytes when no pivot_template.xlsx is present.
+    It includes:
+      - A sorted data sheet named sheet_name (DOC formatting applied).
+      - A PivotSummary aggregated sheet by Brand + parent_col (sum of DOC & DRR).
+      - ChartData and Chart sheets.
+      - HowToPivot instructions.
+    """
+    colors = {
+        "dark_red": "8B0000",
+        "dark_orange": "FF8C00",
+        "dark_green": "006400",
+        "golden": "B8860B",
+        "sky": "0F52BA",
+        "saddle": "8B4513",
+        "white": "FFFFFF",
+    }
+
+    # filter by brands if provided
+    working = df.copy()
+    if selected_brands:
+        working = working[working["Brand"].isin(selected_brands)].copy()
     working = working.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
+    # prepare agg by Brand + parent
     if parent_col and parent_col in working.columns:
         agg = working.groupby(["Brand", parent_col], dropna=False)[["DOC", "DRR"]].sum().reset_index()
         agg["Brand_Parent"] = agg["Brand"].astype(str) + " | " + agg[parent_col].astype(str)
@@ -261,216 +172,109 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
     else:
         agg = pd.DataFrame(columns=["Brand_Parent", "DOC", "DRR"])
 
-    colors = {
-        "dark_red": "8B0000",
-        "dark_orange": "FF8C00",
-        "dark_green": "006400",
-        "golden": "B8860B",
-        "sky": "0F52BA",
-        "saddle": "8B4513",
-        "black": "222222",
-        "white": "FFFFFF",
-    }
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
 
-    # Try programmatic xlsxwriter route first
+    # write data with header
+    for r in dataframe_to_rows(working, index=False, header=True):
+        ws.append(r)
+
+    # apply DOC fills by direct cell styling
     try:
-        import xlsxwriter
-        out = io.BytesIO()
-        with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-            working.to_excel(writer, sheet_name=sheet_name, index=False)
-            agg.to_excel(writer, sheet_name="ChartData", index=False)
-
-            workbook = writer.book
-            ws_data = writer.sheets[sheet_name]
-            ws_chartdata = writer.sheets["ChartData"]
-
-            # Add table to data sheet if possible
-            try:
-                from xlsxwriter.utility import xl_range, xl_col_to_name
-                nrows = working.shape[0] + 1
-                ncols = working.shape[1]
-                table_range = xl_range(0, 0, nrows - 1, ncols - 1)
-                ws_data.add_table(table_range, {'name': 'DataTable', 'columns': [{'header': h} for h in working.columns.tolist()]})
-            except Exception:
-                nrows = working.shape[0] + 1
-                ncols = working.shape[1]
-
-            pivot_created = False
-            pivot_error = None
-
-            try:
-                if hasattr(workbook, "add_pivot_table"):
-                    rows = [{"field": "Brand"}]
-                    parent_field = "(Parent) ASIN" if "(Parent) ASIN" in working.columns else parent_col
-                    if parent_field and parent_field in working.columns:
-                        rows.append({"field": parent_field})
-                    pivot_options = {
-                        "data": {"sheet": sheet_name, "ref": None, "table": "DataTable"},
-                        "rows": rows,
-                        "columns": [],
-                        "filters": [],
-                        "values": [{"field": "DOC", "function": "sum"}, {"field": "DRR", "function": "sum"}],
-                        "location": {"sheet": "PivotTable", "ref": "A3"},
-                    }
-                    workbook.add_worksheet("PivotTable")
-                    workbook.add_pivot_table(pivot_options)
-                    pivot_created = True
-                else:
-                    pivot_error = AttributeError("xlsxwriter pivot API not present.")
-                    pivot_created = False
-            except Exception as e_p:
-                pivot_error = e_p
-                pivot_created = False
-
-            # Chart from ChartData
-            try:
-                chart = workbook.add_chart({'type': 'column'})
-                rows_agg = agg.shape[0]
-                if rows_agg > 0:
-                    chart.add_series({'name': 'Sum of DOC', 'categories': f"=ChartData!$A$2:$A${rows_agg+1}", 'values': f"=ChartData!$B$2:$B${rows_agg+1}"})
-                    chart.add_series({'name': 'Sum of DRR', 'categories': f"=ChartData!$A$2:$A${rows_agg+1}", 'values': f"=ChartData!$C$2:$C${rows_agg+1}"})
-                    chart.set_title({'name': 'Sum DOC and DRR by Brand + Parent'})
-                    chart.set_x_axis({'name': 'Brand | ParentASIN'})
-                    chart_sheet = workbook.add_worksheet("Chart")
-                    chart_sheet.insert_chart('A1', chart)
-            except Exception:
-                pass
-
-            # Conditional formatting for DOC column
-            try:
-                if "DOC" in working.columns:
-                    doc_col_idx = working.columns.get_loc("DOC")
-                    from xlsxwriter.utility import xl_col_to_name
-                    doc_col_letter = xl_col_to_name(doc_col_idx)
-                    data_range = f"{doc_col_letter}2:{doc_col_letter}{nrows}"
-
-                    fmt_dark_red = workbook.add_format({'bg_color': f"#{colors['dark_red']}", 'font_color': "#FFFFFF"})
-                    fmt_orange = workbook.add_format({'bg_color': f"#{colors['dark_orange']}", 'font_color': "#FFFFFF"})
-                    fmt_green = workbook.add_format({'bg_color': f"#{colors['dark_green']}", 'font_color': "#FFFFFF"})
-                    fmt_gold = workbook.add_format({'bg_color': f"#{colors['golden']}", 'font_color': "#FFFFFF"})
-                    fmt_sky = workbook.add_format({'bg_color': f"#{colors['sky']}", 'font_color': "#FFFFFF"})
-                    fmt_saddle = workbook.add_format({'bg_color': f"#{colors['saddle']}", 'font_color': "#FFFFFF"})
-                    fmt_default = workbook.add_format({'bg_color': f"#{colors['white']}", 'font_color': "#000000"})
-
-                    ws_data.conditional_format(data_range, {'type': 'cell', 'criteria': '<', 'value': 7, 'format': fmt_dark_red})
-                    ws_data.conditional_format(data_range, {'type': 'cell', 'criteria': 'between', 'minimum': 7, 'maximum': 14.999, 'format': fmt_orange})
-                    ws_data.conditional_format(data_range, {'type': 'cell', 'criteria': 'between', 'minimum': 15, 'maximum': 29.999, 'format': fmt_green})
-                    ws_data.conditional_format(data_range, {'type': 'cell', 'criteria': 'between', 'minimum': 30, 'maximum': 44.999, 'format': fmt_gold})
-                    ws_data.conditional_format(data_range, {'type': 'cell', 'criteria': 'between', 'minimum': 45, 'maximum': 59.999, 'format': fmt_sky})
-                    ws_data.conditional_format(data_range, {'type': 'cell', 'criteria': 'between', 'minimum': 60, 'maximum': 89.999, 'format': fmt_saddle})
-                    ws_data.conditional_format(data_range, {'type': 'cell', 'criteria': '>=', 'value': 90, 'format': fmt_default})
-            except Exception:
-                pass
-
-        out.seek(0)
-        return out, pivot_created, pivot_error
-
-    except Exception as xlsx_err:
-        pivot_err = xlsx_err
-
-    # Fallback openpyxl path
-    try:
-        wb = Workbook()
-        ws_sorted = wb.active
-        ws_sorted.title = sheet_name
-
-        for r in dataframe_to_rows(working, index=False, header=True):
-            ws_sorted.append(r)
-
-        # DOC fills
-        try:
-            if "DOC" in working.columns:
-                doc_idx = list(working.columns).index("DOC") + 1
-                from openpyxl.styles import PatternFill, Font
-                def _fill_for_val(v):
-                    try:
-                        v = float(v)
-                    except:
-                        return PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid"), Font(color="000000")
-                    if 0 <= v < 7:
-                        return PatternFill(start_color=colors["dark_red"], end_color=colors["dark_red"], fill_type="solid"), Font(color="FFFFFF")
-                    if 7 <= v < 15:
-                        return PatternFill(start_color=colors["dark_orange"], end_color=colors["dark_orange"], fill_type="solid"), Font(color="FFFFFF")
-                    if 15 <= v < 30:
-                        return PatternFill(start_color=colors["dark_green"], end_color=colors["dark_green"], fill_type="solid"), Font(color="FFFFFF")
-                    if 30 <= v < 45:
-                        return PatternFill(start_color=colors["golden"], end_color=colors["golden"], fill_type="solid"), Font(color="FFFFFF")
-                    if 45 <= v < 60:
-                        return PatternFill(start_color=colors["sky"], end_color=colors["sky"], fill_type="solid"), Font(color="FFFFFF")
-                    if 60 <= v < 90:
-                        return PatternFill(start_color=colors["saddle"], end_color=colors["saddle"], fill_type="solid"), Font(color="FFFFFF")
+        if "DOC" in working.columns:
+            doc_idx = list(working.columns).index("DOC") + 1
+            from openpyxl.styles import PatternFill, Font
+            def fill_for_val(v):
+                try:
+                    v = float(v)
+                except:
                     return PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid"), Font(color="000000")
+                if 0 <= v < 7:
+                    return PatternFill(start_color=colors["dark_red"], end_color=colors["dark_red"], fill_type="solid"), Font(color="FFFFFF")
+                if 7 <= v < 15:
+                    return PatternFill(start_color=colors["dark_orange"], end_color=colors["dark_orange"], fill_type="solid"), Font(color="FFFFFF")
+                if 15 <= v < 30:
+                    return PatternFill(start_color=colors["dark_green"], end_color=colors["dark_green"], fill_type="solid"), Font(color="FFFFFF")
+                if 30 <= v < 45:
+                    return PatternFill(start_color=colors["golden"], end_color=colors["golden"], fill_type="solid"), Font(color="FFFFFF")
+                if 45 <= v < 60:
+                    return PatternFill(start_color=colors["sky"], end_color=colors["sky"], fill_type="solid"), Font(color="FFFFFF")
+                if 60 <= v < 90:
+                    return PatternFill(start_color=colors["saddle"], end_color=colors["saddle"], fill_type="solid"), Font(color="FFFFFF")
+                return PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid"), Font(color="000000")
 
-                for row in range(2, ws_sorted.max_row + 1):
-                    cell = ws_sorted.cell(row=row, column=doc_idx)
-                    fill, font = _fill_for_val(cell.value)
-                    cell.fill = fill
-                    cell.font = font
-        except Exception:
-            pass
+            for row in range(2, ws.max_row + 1):
+                cell = ws.cell(row=row, column=doc_idx)
+                fill, font = fill_for_val(cell.value)
+                cell.fill = fill
+                cell.font = font
+    except Exception:
+        pass
 
-        # Add DataTable openpyxl
-        try:
-            from openpyxl.worksheet.table import Table, TableStyleInfo
-            max_row = ws_sorted.max_row
-            max_col = ws_sorted.max_column
-            ref = f"A1:{get_column_letter(max_col)}{max_row}"
-            table = Table(displayName="DataTable", ref=ref)
-            table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium9", showRowStripes=True)
-            ws_sorted.add_table(table)
-        except Exception:
-            pass
+    # try to create an Excel Table for DataTable (so user can quickly create Pivot)
+    try:
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+        max_row = ws.max_row
+        max_col = ws.max_column
+        ref = f"A1:{get_column_letter(max_col)}{max_row}"
+        table = Table(displayName="DataTable", ref=ref)
+        table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium9", showRowStripes=True)
+        ws.add_table(table)
+    except Exception:
+        pass
 
-        # PivotSummary
-        ws_pivot = wb.create_sheet("PivotSummary")
-        for r in dataframe_to_rows(agg, index=False, header=True):
-            ws_pivot.append(r)
+    # PivotSummary sheet
+    ws_pivot = wb.create_sheet("PivotSummary")
+    for r in dataframe_to_rows(agg, index=False, header=True):
+        ws_pivot.append(r)
 
-        # DOC fills on PivotSummary
-        try:
-            headers = [c.value for c in ws_pivot[1]]
-            if "DOC" in headers:
-                doc_idx_p = headers.index("DOC") + 1
-                from openpyxl.styles import PatternFill, Font
-                for row in range(2, ws_pivot.max_row + 1):
-                    cell = ws_pivot.cell(row=row, column=doc_idx_p)
-                    try:
-                        val = float(cell.value)
-                    except:
-                        val = None
-                    if val is None:
-                        cell.fill = PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid")
-                        cell.font = Font(color="000000")
-                    elif 0 <= val < 7:
-                        cell.fill = PatternFill(start_color=colors["dark_red"], end_color=colors["dark_red"], fill_type="solid")
-                        cell.font = Font(color="FFFFFF")
-                    elif 7 <= val < 15:
-                        cell.fill = PatternFill(start_color=colors["dark_orange"], end_color=colors["dark_orange"], fill_type="solid")
-                        cell.font = Font(color="FFFFFF")
-                    elif 15 <= val < 30:
-                        cell.fill = PatternFill(start_color=colors["dark_green"], end_color=colors["dark_green"], fill_type="solid")
-                        cell.font = Font(color="FFFFFF")
-                    elif 30 <= val < 45:
-                        cell.fill = PatternFill(start_color=colors["golden"], end_color=colors["golden"], fill_type="solid")
-                        cell.font = Font(color="FFFFFF")
-                    elif 45 <= val < 60:
-                        cell.fill = PatternFill(start_color=colors["sky"], end_color=colors["sky"], fill_type="solid")
-                        cell.font = Font(color="FFFFFF")
-                    elif 60 <= val < 90:
-                        cell.fill = PatternFill(start_color=colors["saddle"], end_color=colors["saddle"], fill_type="solid")
-                        cell.font = Font(color="FFFFFF")
-                    else:
-                        cell.fill = PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid")
-                        cell.font = Font(color="000000")
-        except Exception:
-            pass
+    # apply DOC fills on PivotSummary if present
+    try:
+        headers = [c.value for c in ws_pivot[1]]
+        if "DOC" in headers:
+            doc_idx_p = headers.index("DOC") + 1
+            from openpyxl.styles import PatternFill, Font
+            for row in range(2, ws_pivot.max_row + 1):
+                cell = ws_pivot.cell(row=row, column=doc_idx_p)
+                try:
+                    val = float(cell.value)
+                except:
+                    val = None
+                if val is None:
+                    cell.fill = PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid")
+                    cell.font = Font(color="000000")
+                elif 0 <= val < 7:
+                    cell.fill = PatternFill(start_color=colors["dark_red"], end_color=colors["dark_red"], fill_type="solid")
+                    cell.font = Font(color="FFFFFF")
+                elif 7 <= val < 15:
+                    cell.fill = PatternFill(start_color=colors["dark_orange"], end_color=colors["dark_orange"], fill_type="solid")
+                    cell.font = Font(color="FFFFFF")
+                elif 15 <= val < 30:
+                    cell.fill = PatternFill(start_color=colors["dark_green"], end_color=colors["dark_green"], fill_type="solid")
+                    cell.font = Font(color="FFFFFF")
+                elif 30 <= val < 45:
+                    cell.fill = PatternFill(start_color=colors["golden"], end_color=colors["golden"], fill_type="solid")
+                    cell.font = Font(color="FFFFFF")
+                elif 45 <= val < 60:
+                    cell.fill = PatternFill(start_color=colors["sky"], end_color=colors["sky"], fill_type="solid")
+                    cell.font = Font(color="FFFFFF")
+                elif 60 <= val < 90:
+                    cell.fill = PatternFill(start_color=colors["saddle"], end_color=colors["saddle"], fill_type="solid")
+                    cell.font = Font(color="FFFFFF")
+                else:
+                    cell.fill = PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid")
+                    cell.font = Font(color="000000")
+    except Exception:
+        pass
 
-        # ChartData
-        ws_chartdata = wb.create_sheet("ChartData")
+    # ChartData sheet
+    ws_chartdata = wb.create_sheet("ChartData")
+    if not agg.empty:
         for r in dataframe_to_rows(agg[["Brand_Parent", "DOC", "DRR"]], index=False, header=True):
             ws_chartdata.append(r)
 
-        # Chart
+        # Create a bar chart
         try:
             from openpyxl.chart import BarChart, Reference
             if ws_chartdata.max_row > 1:
@@ -487,139 +291,61 @@ def create_workbook_with_brand_parent_pivot_and_doc_format(df_full, sort_desc: b
         except Exception:
             pass
 
-        # HowToPivot
-        try:
-            how = wb.create_sheet("HowToPivot")
-            how.append(["How to create interactive PivotTable + Slicer in Excel (no VBA)"])
-            how.append([])
-            how.append(["1) In Excel: Insert → PivotTable"])
-            how.append([f"   - Select the table named 'DataTable' on the sheet: {sheet_name}"])
-            how.append(["   - Place the PivotTable on a new worksheet."])
-            how.append([])
-            how.append(["2) In PivotField list: drag 'Brand' and '(Parent) ASIN' (or your parent column) into Rows (Brand first)."])
-            how.append(["   - Drag 'DOC' and 'DRR' into Values (set aggregation = Sum)."])
-            how.append([])
-            how.append(["3) To add a Slicer: Insert → Slicer → choose 'Brand'."])
-            how.append(["   - The slicer will filter both the Pivot and any PivotChart based on that Pivot."])
-        except Exception:
-            pass
-
-        buf = io.BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        return buf, False, pivot_err
-
-    except Exception as e_fb:
-        raise RuntimeError(f"Both pivot attempt and fallback failed: {pivot_err}; fallback_err={e_fb}")
-
-# ---------------------
-# Streamlit UI + original processing logic
-# ---------------------
-st.set_page_config(page_title="OOS Amazon Analysis", page_icon="📊", layout="wide")
-
-# CSS and legend
-st.markdown(
-    """
-<style>
-    .stApp { max-width: 100%; }
-    .doc-legend { display: flex; gap: 15px; flex-wrap: wrap; margin: 20px 0; }
-    .legend-item { display: flex; align-items: center; gap: 8px; }
-    .legend-box { width: 30px; height: 30px; border: 1px solid #ddd; border-radius: 4px; }
-</style>
-""", unsafe_allow_html=True
-)
-
-def color_doc(val):
+    # HowToPivot
     try:
-        doc = float(val)
-        if 0 <= doc < 7:
-            return "background-color: #8B0000; color: white"
-        elif 7 <= doc < 15:
-            return "background-color: #FF8C00; color: white"
-        elif 15 <= doc < 30:
-            return "background-color: #006400; color: white"
-        elif 30 <= doc < 45:
-            return "background-color: #B8860B; color: white"
-        elif 45 <= doc < 60:
-            return "background-color: #0F52BA; color: white"
-        elif 60 <= doc < 90:
-            return "background-color: #8B4513; color: white"
-        else:
-            return "background-color: #222222; color: white"
-    except:
-        return ""
+        how = wb.create_sheet("HowToPivot")
+        how.append(["How to create interactive PivotTable + Slicer in Excel (no VBA)"])
+        how.append([])
+        how.append(["1) In Excel: Insert → PivotTable"])
+        how.append([f"   - Select the table named 'DataTable' on the sheet: {sheet_name}"])
+        how.append(["   - Place the PivotTable on a new worksheet."])
+        how.append([])
+        how.append(["2) In PivotField list: drag 'Brand' and '(Parent) ASIN' (or your parent column) into Rows (Brand first)."])
+        how.append(["   - Drag 'DOC' and 'DRR' into Values (set aggregation = Sum)."])
+        how.append([])
+        how.append(["3) To add a Slicer: Insert → Slicer → choose 'Brand'."])
+    except Exception:
+        pass
 
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+# -------------------------
+# UI: file upload and processing (keeps your original logic)
+# -------------------------
 st.title("📊 Inventory Analysis Dashboard")
 st.markdown("Upload your files and analyze inventory with Days of Coverage (DOC) calculations")
 
-# Sidebar configuration
 with st.sidebar:
     st.header("⚙️ Configuration")
-    st.markdown("### Number of Days for Analysis")
     no_of_days = st.number_input(
         "Enter the number of days",
         min_value=1,
         value=31,
         step=1,
-        help="This represents the time period for your sales data. The DRR (Daily Run Rate) will be calculated by dividing Total Order Items by this number.",
+        help="This represents the time period for your sales data. DRR = Total Order Items ÷ Days.",
     )
     st.info(
         """
-    **What is Number of Days?**
-
-    - **DRR** (Daily Run Rate) = Total Order Items ÷ Days
-    - **DOC** (Days of Coverage) = Fulfillable Qty ÷ DRR
-    """
+- DRR (Daily Run Rate) = Total Order Items ÷ Days
+- DOC (Days of Coverage) = afn-fulfillable-quantity ÷ DRR
+"""
     )
 
-    st.markdown("---")
-    st.subheader("Diagnostics")
-    if st.button("Check xlsxwriter pivot & COM support"):
-        try:
-            import xlsxwriter
-            st.write("xlsxwriter version:", xlsxwriter.__version__)
-            has_pivot_api = hasattr(xlsxwriter.Workbook, "add_pivot_table")
-            st.write("xlsxwriter add_pivot_table available:", bool(has_pivot_api))
-        except Exception as ex:
-            st.write("xlsxwriter not available:", ex)
-        if os.name == 'nt':
-            try:
-                import win32com.client as win32  # type: ignore
-                st.write("pywin32 available (win32com).")
-            except Exception as ex:
-                st.write("pywin32 not available:", ex)
-        else:
-            st.write("COM automation only available on Windows.")
-
-# File uploads
 st.header("📁 Upload Files")
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.subheader("Business Report")
     business_file = st.file_uploader("Upload Business Report CSV", type=["csv"], key="business")
 with col2:
-    st.subheader("PM Data")
     pm_file = st.file_uploader("Upload PM Excel/CSV", type=["xlsx", "csv"], key="pm")
 with col3:
-    st.subheader("Inventory Data")
     inventory_file = st.file_uploader("Upload Manage Inventory CSV", type=["csv"], key="inventory")
-
-# DOC legend display
-st.header("🎨 DOC Color Legend")
-st.markdown("""
-<div class="doc-legend">
-    <div class="legend-item"><div class="legend-box" style="background-color: #8B0000;"></div><span><b>0-7 days</b> (Critical)</span></div>
-    <div class="legend-item"><div class="legend-box" style="background-color: #FF8C00;"></div><span><b>7-15 days</b> (Low)</span></div>
-    <div class="legend-item"><div class="legend-box" style="background-color: #006400;"></div><span><b>15-30 days</b> (Good)</span></div>
-    <div class="legend-item"><div class="legend-box" style="background-color: #B8860B;"></div><span><b>30-45 days</b> (Optimal)</span></div>
-    <div class="legend-item"><div class="legend-box" style="background-color: #0F52BA;"></div><span><b>45-60 days</b> (High)</span></div>
-    <div class="legend-item"><div class="legend-box" style="background-color: #8B4513;"></div><span><b>60-90 days</b> (Excess)</span></div>
-</div>
-""", unsafe_allow_html=True)
 
 st.markdown("---")
 
-# Main processing
+# Process button
 if st.button("🚀 Process Data"):
     if business_file is None or pm_file is None or inventory_file is None:
         st.error("⚠️ Please upload all three files before processing!")
@@ -628,12 +354,13 @@ if st.button("🚀 Process Data"):
     else:
         with st.spinner("Processing data..."):
             try:
-                st.info("📖 Reading files...")
                 original = pd.read_csv(business_file)
 
+                # SKU as str
                 if "SKU" in original.columns:
                     original["SKU"] = original["SKU"].astype(str)
 
+                # read pm
                 if pm_file.name.endswith(".xlsx"):
                     pm = pd.read_excel(pm_file)
                 else:
@@ -643,7 +370,7 @@ if st.button("🚀 Process Data"):
                 inventory.columns = inventory.columns.str.strip()
                 inventory.iloc[:, 0] = inventory.iloc[:, 0].astype(str)
 
-                # Process pm
+                # process pm (columns C-G -> indices 2:7)
                 pm = pm.iloc[:, 2:7]
                 pm.columns = ["Amazon Sku Name", "D", "Brand Manager", "F", "Brand"]
                 pm["Amazon Sku Name"] = pm["Amazon Sku Name"].astype(str)
@@ -660,8 +387,7 @@ if st.button("🚀 Process Data"):
                     col = original.pop("Brand")
                     original.insert(insert_pos, "Brand", col)
 
-                # inventory mapping
-                inventory.columns = inventory.columns.str.strip()
+                # map inventory
                 if inventory.shape[1] > 10:
                     return_col = inventory.columns[10]
                     mi_map = inventory.set_index(inventory.columns[0])[return_col]
@@ -676,6 +402,7 @@ if st.button("🚀 Process Data"):
                 else:
                     original["afn-reserved-quantity"] = 0
 
+                # clean and compute DRR
                 if "Total Order Items" in original.columns:
                     original["Total Order Items"] = (
                         original["Total Order Items"]
@@ -695,20 +422,17 @@ if st.button("🚀 Process Data"):
 
                 st.success("✅ Data processed successfully!")
 
-                # Display metrics
+                # metrics
                 st.header("📈 Processed Results")
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
                     st.metric("Total Products", len(original))
-                with col2:
-                    critical_stock = len(original[original["DOC"] < 7])
-                    st.metric("Critical Stock (< 7 days)", critical_stock)
-                with col3:
-                    avg_doc = original["DOC"].mean()
-                    st.metric("Average DOC", f"{avg_doc:.2f} days")
-                with col4:
-                    total_orders = original["Total Order Items"].sum()
-                    st.metric("Total Orders", f"{total_orders:,.0f}")
+                with c2:
+                    st.metric("Critical Stock (< 7 days)", int((original["DOC"] < 7).sum()))
+                with c3:
+                    st.metric("Average DOC", f"{original['DOC'].mean():.2f} days")
+                with c4:
+                    st.metric("Total Orders", f"{original['Total Order Items'].sum():,.0f}")
 
                 st.markdown("---")
 
@@ -727,26 +451,31 @@ if st.button("🚀 Process Data"):
                 display_cols = [col for col in display_cols if col in original.columns]
                 display_df = original[display_cols].copy()
                 styled_df = display_df.style.map(color_doc, subset=["DOC"])
-                st.dataframe(styled_df, use_container_width=True, height=600)
+
+                # updated Streamlit API: width instead of use_container_width
+                st.dataframe(styled_df, width="stretch", height=600)
 
                 st.markdown("---")
-                col1, col2 = st.columns(2)
 
-                # CSV download
-                with col1:
-                    csv_buffer = io.StringIO()
-                    original.to_csv(csv_buffer, index=False)
-                    csv_data = csv_buffer.getvalue()
+                # Excel exports (template-first)
+                colA, colB = st.columns(2)
+                with colA:
+                    csv_buf = io.StringIO()
+                    original.to_csv(csv_buf, index=False)
                     st.download_button(
-                        label="📥 Download as CSV",
-                        data=csv_data,
-                        file_name=f"processed_inventory_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        "📥 Download CSV",
+                        data=csv_buf.getvalue(),
+                        file_name=f"processed_inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                         mime="text/csv",
                     )
 
-                # Excel export block (safe: COM -> template -> fallback)
-                with col2:
-                    try:
+                with colB:
+                    st.markdown("### Excel export (Template-first pivot)")
+                    over = st.button("📥 Overstock (DOC ↓) - Export Excel", key="over_export")
+                    oos = st.button("📥 OOS (DOC ↑) - Export Excel", key="oos_export")
+
+                    if over or oos:
+                        sort_desc = True if over else False
                         # detect parent col
                         parent_col = None
                         for c in original.columns:
@@ -754,145 +483,67 @@ if st.button("🚀 Process Data"):
                             if "parent" in cle:
                                 parent_col = c
                                 break
-                    except Exception:
-                        parent_col = None
 
-                    st.markdown("### Excel exports (Pivot attempt: Brand + (Parent) ASIN, DOC formatting applied)")
-                    over_btn = st.button("📥 Overstock (DOC ↓) — create Excel with Pivot attempt", key="overstock_export")
-                    oos_btn = st.button("📥 OOS (DOC ↑) — create Excel with Pivot attempt", key="oos_export")
+                        brands = sorted(original["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in original.columns else []
+                        selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
 
-                    df_to_use = original
+                        # prepare dataframe for export
+                        df_export = original.copy()
+                        if selected:
+                            df_export = df_export[df_export["Brand"].isin(selected)].copy()
+                        df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
-                    if over_btn or oos_btn:
-                        sort_desc = True if over_btn else False
-                        brands = sorted(df_to_use["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in df_to_use.columns else []
-                        selected_brands = st.multiselect("Filter brands for Excel export (leave empty = all)", options=brands, default=brands)
+                        # 1) Try pivot template
+                        template_path = os.path.join(os.path.dirname(__file__), "pivot_template.xlsx")
+                        final_bytes = None
+                        template_used = False
+                        template_error = None
 
-                        try:
-                            # create initial workbook bytes (programmatic attempt)
-                            buf, pivot_ok, pivot_info = create_workbook_with_brand_parent_pivot_and_doc_format(
-                                df_to_use,
-                                sort_desc=sort_desc,
-                                sheet_name="Overstock" if sort_desc else "OOS",
-                                selected_brands=selected_brands,
-                                parent_col=parent_col,
-                            )
-                            final_bytes = buf.getvalue()
-
-                            com_attempted = False
-                            com_ok = False
-                            com_error = None
-                            template_used = False
-                            template_error = None
-
-                            # 1) Try COM on Windows if pywin32 available
-                            if os.name == "nt":
-                                try:
-                                    import importlib
-                                    importlib.import_module("win32com.client")
-                                    has_pywin = True
-                                except Exception:
-                                    has_pywin = False
-
-                                if has_pywin:
-                                    com_attempted = True
-                                    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-                                        tmp_name = tmp.name
-                                        tmp.write(final_bytes)
-                                        tmp.flush()
-                                    try:
-                                        ok, com_tb = create_pivot_with_com(tmp_name, data_sheet_name="Overstock" if sort_desc else "OOS", table_name="DataTable", pivot_sheet_name="PivotTable", parent_field_hint="(Parent) ASIN")
-                                        if ok:
-                                            com_ok = True
-                                            with open(tmp_name, "rb") as f:
-                                                final_bytes = f.read()
-                                        else:
-                                            com_ok = False
-                                            com_error = com_tb
-                                    except Exception as ce:
-                                        com_ok = False
-                                        com_error = traceback.format_exc()
-                                    finally:
-                                        try:
-                                            os.remove(tmp_name)
-                                        except Exception:
-                                            pass
-
-                            # 2) If COM not used or failed, try the local pivot template
-                            if not com_ok:
-                                template_path = os.path.join(os.path.dirname(__file__), "pivot_template.xlsx")
-                                if os.path.exists(template_path):
-                                    try:
-                                        # create df_subset same as used in create_workbook...
-                                        df_subset = df_to_use[df_to_use["Brand"].isin(selected_brands)].copy() if selected_brands else df_to_use.copy()
-                                        df_subset = df_subset.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
-                                        tpl_buf = fill_template_and_get_bytes(template_path, df_subset, data_sheet_name="DataTable", table_name="DataTable")
-                                        final_bytes = tpl_buf.getvalue()
-                                        template_used = True
-                                    except Exception as te:
-                                        template_error = traceback.format_exc()
-                                        template_used = False
-
-                            # deliver final_bytes
-                            st.download_button(
-                                label="Download Excel workbook",
-                                data=final_bytes,
-                                file_name=f"{'overstock' if sort_desc else 'oos'}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            )
-
-                            # Messages
-                            if com_attempted:
-                                if com_ok:
-                                    st.success("✅ COM automation succeeded — PivotTable, PivotChart and Slicer added in Excel (Windows + Excel).")
-                                else:
-                                    st.warning("⚠️ COM attempted but failed; delivered workbook without COM pivot. See details below.")
-                                    if com_error:
-                                        st.code(com_error)
-                            else:
-                                st.info("COM automation not attempted (non-Windows or pywin32 missing).")
-
-                            if template_used:
-                                st.success("✅ pivot_template.xlsx was used — the exported workbook contains a working PivotTable/PivotChart/Slicer when opened in Excel.")
-                            elif template_error:
-                                st.warning("⚠️ A pivot template was present but failed to be filled programmatically. Delivered fallback workbook; see error below.")
+                        if os.path.exists(template_path):
+                            try:
+                                buf = fill_template_and_get_bytes(template_path, df_export, table_name="DataTable")
+                                final_bytes = buf.getvalue()
+                                template_used = True
+                                st.success("✅ Used pivot_template.xlsx — Pivot/Slicer included (open in Excel).")
+                            except Exception as te:
+                                template_error = traceback.format_exc()
+                                st.warning("⚠️ pivot_template.xlsx found but failed to be filled programmatically. Falling back to generated workbook.")
                                 st.code(template_error)
-                            else:
-                                if not com_ok:
-                                    if pivot_ok:
-                                        st.success("✅ Programmatic pivot created with xlsxwriter. Open workbook and use Pivot UI to filter by Brand.")
-                                    else:
-                                        st.info("⚠️ Delivered fallback workbook (DataTable + PivotSummary + HowToPivot). Use Excel to build an interactive Pivot/Slicer or provide pivot_template.xlsx for automatic insertion.")
-                                        if pivot_info:
-                                            st.info(f"Pivot attempt info: {pivot_info}")
 
-                        except Exception as e:
-                            st.error(f"Failed to create workbook: {e}")
-                            st.exception(e)
+                        # 2) Fallback: create workbook programmatically
+                        if final_bytes is None:
+                            fallback_buf = create_fallback_workbook(df_export, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", parent_col=parent_col, selected_brands=selected)
+                            final_bytes = fallback_buf.getvalue()
+                            st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
-                # store session
+                        # deliver download
+                        st.download_button(
+                            label="Download Excel workbook",
+                            data=final_bytes,
+                            file_name=f"{'overstock' if sort_desc else 'oos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
+
+                # persist
                 st.session_state["processed_data"] = original
 
             except Exception as e:
-                st.error(f"❌ An error occurred: {str(e)}")
+                st.error("❌ Processing failed.")
                 st.exception(e)
 
-# Show previously processed results (if any)
+# show previously processed
 elif "processed_data" in st.session_state:
-    original = st.session_state["processed_data"]
+    orig = st.session_state["processed_data"]
     st.header("📈 Previously Processed Results")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Products", len(original))
-    with col2:
-        critical_stock = len(original[original["DOC"] < 7])
-        st.metric("Critical Stock (< 7 days)", critical_stock)
-    with col3:
-        avg_doc = original["DOC"].mean()
-        st.metric("Average DOC", f"{avg_doc:.2f} days")
-    with col4:
-        total_orders = original["Total Order Items"].sum()
-        st.metric("Total Orders", f"{total_orders:,.0f}")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Total Products", len(orig))
+    with c2:
+        st.metric("Critical Stock (< 7 days)", int((orig["DOC"] < 7).sum()))
+    with c3:
+        st.metric("Average DOC", f"{orig['DOC'].mean():.2f} days")
+    with c4:
+        st.metric("Total Orders", f"{orig['Total Order Items'].sum():,.0f}")
 
     st.markdown("---")
     display_cols = [
@@ -907,141 +558,66 @@ elif "processed_data" in st.session_state:
         "DRR",
         "DOC",
     ]
-    display_cols = [col for col in display_cols if col in original.columns]
-    display_df = original[display_cols].copy()
+    display_cols = [col for col in display_cols if col in orig.columns]
+    display_df = orig[display_cols].copy()
     styled_df = display_df.style.map(color_doc, subset=["DOC"])
-    st.dataframe(styled_df, use_container_width=True, height=600)
+    st.dataframe(styled_df, width="stretch", height=600)
 
     st.markdown("---")
-    col1, col2 = st.columns(2)
-    with col1:
-        csv_buffer = io.StringIO()
-        original.to_csv(csv_buffer, index=False)
-        csv_data = csv_buffer.getvalue()
+    cA, cB = st.columns(2)
+    with cA:
+        csv_buf = io.StringIO()
+        orig.to_csv(csv_buf, index=False)
         st.download_button(
-            label="📥 Download as CSV",
-            data=csv_data,
-            file_name=f"processed_inventory_analysis_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            "📥 Download CSV",
+            data=csv_buf.getvalue(),
+            file_name=f"processed_inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
         )
-    with col2:
-        try:
+    with cB:
+        st.markdown("### Excel export (Template-first pivot)")
+        over2 = st.button("📥 Overstock (DOC ↓) - Export Excel (previous)", key="over_prev")
+        oos2 = st.button("📥 OOS (DOC ↑) - Export Excel (previous)", key="oos_prev")
+
+        if over2 or oos2:
+            sort_desc = True if over2 else False
             parent_col = None
-            for c in original.columns:
+            for c in orig.columns:
                 cle = c.lower().replace(" ", "").replace("_", "").replace("(", "").replace(")", "")
                 if "parent" in cle:
                     parent_col = c
                     break
-        except Exception:
-            parent_col = None
+            brands = sorted(orig["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in orig.columns else []
+            selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
 
-        st.markdown("### Excel exports (Pivot attempt: Brand + (Parent) ASIN, DOC formatting applied)")
-        over_btn = st.button("📥 Overstock (DOC ↓) — create Excel with Pivot attempt (previous results)", key="overstock_export_prev")
-        oos_btn = st.button("📥 OOS (DOC ↑) — create Excel with Pivot attempt (previous results)", key="oos_export_prev")
+            df_export = orig.copy()
+            if selected:
+                df_export = df_export[df_export["Brand"].isin(selected)].copy()
+            df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
-        df_to_use = original
+            template_path = os.path.join(os.path.dirname(__file__), "pivot_template.xlsx")
+            final_bytes = None
+            if os.path.exists(template_path):
+                try:
+                    buf = fill_template_and_get_bytes(template_path, df_export, table_name="DataTable")
+                    final_bytes = buf.getvalue()
+                    st.success("✅ Used pivot_template.xlsx — Pivot/Slicer included (open in Excel).")
+                except Exception as te:
+                    st.warning("⚠️ pivot_template.xlsx found but failed to be filled programmatically. Falling back to generated workbook.")
+                    st.code(traceback.format_exc())
 
-        if over_btn or oos_btn:
-            sort_desc = True if over_btn else False
-            brands = sorted(df_to_use["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in df_to_use.columns else []
-            selected_brands = st.multiselect("Filter brands for Excel export (leave empty = all)", options=brands, default=brands)
+            if final_bytes is None:
+                fallback_buf = create_fallback_workbook(df_export, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", parent_col=parent_col, selected_brands=selected)
+                final_bytes = fallback_buf.getvalue()
+                st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
-            try:
-                buf, pivot_ok, pivot_info = create_workbook_with_brand_parent_pivot_and_doc_format(
-                    df_to_use,
-                    sort_desc=sort_desc,
-                    sheet_name="Overstock" if sort_desc else "OOS",
-                    selected_brands=selected_brands,
-                    parent_col=parent_col,
-                )
-                final_bytes = buf.getvalue()
+            st.download_button(
+                label="Download Excel workbook",
+                data=final_bytes,
+                file_name=f"{'overstock' if sort_desc else 'oos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
-                com_attempted = False
-                com_ok = False
-                com_error = None
-                template_used = False
-                template_error = None
-
-                if os.name == "nt":
-                    try:
-                        import importlib
-                        importlib.import_module("win32com.client")
-                        has_pywin = True
-                    except Exception:
-                        has_pywin = False
-                    if has_pywin:
-                        com_attempted = True
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-                            tmp_name = tmp.name
-                            tmp.write(final_bytes)
-                            tmp.flush()
-                        try:
-                            ok, com_tb = create_pivot_with_com(tmp_name, data_sheet_name="Overstock" if sort_desc else "OOS", table_name="DataTable", pivot_sheet_name="PivotTable", parent_field_hint="(Parent) ASIN")
-                            if ok:
-                                com_ok = True
-                                with open(tmp_name, "rb") as f:
-                                    final_bytes = f.read()
-                            else:
-                                com_ok = False
-                                com_error = com_tb
-                        except Exception as ce:
-                            com_ok = False
-                            com_error = traceback.format_exc()
-                        finally:
-                            try:
-                                os.remove(tmp_name)
-                            except Exception:
-                                pass
-
-                if not com_ok:
-                    template_path = os.path.join(os.path.dirname(__file__), "pivot_template.xlsx")
-                    if os.path.exists(template_path):
-                        try:
-                            df_subset = df_to_use[df_to_use["Brand"].isin(selected_brands)].copy() if selected_brands else df_to_use.copy()
-                            df_subset = df_subset.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
-                            tpl_buf = fill_template_and_get_bytes(template_path, df_subset, data_sheet_name="DataTable", table_name="DataTable")
-                            final_bytes = tpl_buf.getvalue()
-                            template_used = True
-                        except Exception as te:
-                            template_error = traceback.format_exc()
-                            template_used = False
-
-                st.download_button(
-                    label="Download Excel workbook",
-                    data=final_bytes,
-                    file_name=f"{'overstock' if sort_desc else 'oos'}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-
-                if com_attempted:
-                    if com_ok:
-                        st.success("✅ COM automation succeeded — PivotTable, PivotChart and Slicer added in Excel (Windows + Excel).")
-                    else:
-                        st.warning("⚠️ COM attempted but failed; delivered workbook without COM pivot. See details below.")
-                        if com_error:
-                            st.code(com_error)
-                else:
-                    st.info("COM automation not attempted (non-Windows or pywin32 missing).")
-
-                if template_used:
-                    st.success("✅ pivot_template.xlsx was used — the exported workbook contains a working PivotTable/PivotChart/Slicer when opened in Excel.")
-                elif template_error:
-                    st.warning("⚠️ A pivot template was present but failed to be filled programmatically. Delivered fallback workbook; see error below.")
-                    st.code(template_error)
-                else:
-                    if not com_ok:
-                        if pivot_ok:
-                            st.success("✅ Programmatic pivot created with xlsxwriter. Open workbook and use Pivot UI to filter by Brand.")
-                        else:
-                            st.info("⚠️ Delivered fallback workbook (DataTable + PivotSummary + HowToPivot). Use Excel to build an interactive Pivot/Slicer or provide pivot_template.xlsx for automatic insertion.")
-                            if pivot_info:
-                                st.info(f"Pivot attempt info: {pivot_info}")
-
-            except Exception as e:
-                st.error(f"Failed to create workbook: {e}")
-                st.exception(e)
-
-# Footer
+# footer
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #666; padding: 20px;'><p>Inventory Analysis Dashboard | Built with Streamlit</p></div>", unsafe_allow_html=True)
-
+st.markdown("<div style='text-align: center; color: #666; padding: 10px;'>Inventory Analysis Dashboard | Built with Streamlit</div>", unsafe_allow_html=True)
