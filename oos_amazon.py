@@ -681,15 +681,12 @@ if st.button("🚀 Process Data"):
 
                         # === FILTERING LOGIC ===
                         if oos and "afn-fulfillable-quantity" in df_export.columns:
-                            # OOS: 0–10 units
-                            df_export = df_export[
-                                (df_export["afn-fulfillable-quantity"] >= 0) &
-                                (df_export["afn-fulfillable-quantity"] <= 10)
-                            ].copy()
+                            # OOS: quantity exactly 0
+                            df_export = df_export[df_export["afn-fulfillable-quantity"] == 0].copy()
 
-                        if over and "afn-fulfillable-quantity" in df_export.columns:
-                            # Overstock: > 90 units
-                            df_export = df_export[df_export["afn-fulfillable-quantity"] > 90].copy()
+                        if over and "DOC" in df_export.columns:
+                            # Overstock: DOC > 90
+                            df_export = df_export[df_export["DOC"] > 90].copy()
 
                         df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
@@ -762,7 +759,7 @@ elif "processed_data" in st.session_state:
     with c3:
         st.metric("Average DOC", f"{orig['DOC'].mean():.2f} days")
     with c4:
-        st.metric("Total Orders", f"{orig['Total Order Items'].sum():,.0f}")
+        st.metric("Total Orders", f"{orig['Total Order Items"].sum():,.0f}")
 
     st.markdown("---")
     display_cols = [
@@ -826,15 +823,12 @@ elif "processed_data" in st.session_state:
 
             # === FILTERING LOGIC (PREVIOUS DATA) ===
             if oos2 and "afn-fulfillable-quantity" in df_export.columns:
-                # OOS: 0–10 units
-                df_export = df_export[
-                    (df_export["afn-fulfillable-quantity"] >= 0) &
-                    (df_export["afn-fulfillable-quantity"] <= 10)
-                ].copy()
+                # OOS: quantity exactly 0
+                df_export = df_export[df_export["afn-fulfillable-quantity"] == 0].copy()
 
-            if over2 and "afn-fulfillable-quantity" in df_export.columns:
-                # Overstock: > 90 units
-                df_export = df_export[df_export["afn-fulfillable-quantity"] > 90].copy()
+            if over2 and "DOC" in df_export.columns:
+                # Overstock: DOC > 90
+                df_export = df_export[df_export["DOC"] > 90].copy()
 
             df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
