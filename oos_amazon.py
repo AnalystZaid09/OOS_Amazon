@@ -6,7 +6,8 @@ import os
 import traceback
 from datetime import datetime
 from openpyxl import Workbook, load_workbook
-from openpyxl.utils.dataframe import dataframe_to_rows, get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="OOS Amazon Analysis", page_icon="📊", layout="wide")
 
@@ -64,19 +65,26 @@ def color_doc(val):
         return ""
 
 def create_excel_with_doc_format(df: pd.DataFrame) -> bytes:
+    """
+    Create an XLSX bytes object from df and apply DOC conditional formatting
+    matching the app's color buckets. Returns bytes.
+    """
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font
     from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.utils import get_column_letter
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Data"
 
+    # Write header + rows (preserve types where possible)
     header = list(df.columns)
     ws.append(header)
     for row in df.itertuples(index=False, name=None):
         ws.append(list(row))
 
+    # Find DOC column index (case-insensitive contains 'doc')
     header_row = [cell.value for cell in ws[1]]
     doc_idx = None
     for idx, h in enumerate(header_row, start=1):
@@ -84,6 +92,7 @@ def create_excel_with_doc_format(df: pd.DataFrame) -> bytes:
             doc_idx = idx
             break
 
+    # Color map (same as app)
     col_map = {
         "dark_red": "8B0000",
         "dark_orange": "FF8C00",
@@ -102,48 +111,30 @@ def create_excel_with_doc_format(df: pd.DataFrame) -> bytes:
             rng = f"{col_letter}{first_data_row}:{col_letter}{last_row}"
 
             rules = [
-                CellIsRule(
-                    operator="between",
-                    formula=["0", "6.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["dark_red"], end_color=col_map["dark_red"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
-                CellIsRule(
-                    operator="between",
-                    formula=["7", "14.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["dark_orange"], end_color=col_map["dark_orange"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
-                CellIsRule(
-                    operator="between",
-                    formula=["15", "29.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["dark_green"], end_color=col_map["dark_green"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
-                CellIsRule(
-                    operator="between",
-                    formula=["30", "44.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["golden"], end_color=col_map["golden"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
-                CellIsRule(
-                    operator="between",
-                    formula=["45", "59.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["sky"], end_color=col_map["sky"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
-                CellIsRule(
-                    operator="between",
-                    formula=["60", "89.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["saddle"], end_color=col_map["saddle"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
+                CellIsRule(operator='between', formula=['0','6.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_red"], end_color=col_map["dark_red"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['7','14.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_orange"], end_color=col_map["dark_orange"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['15','29.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_green"], end_color=col_map["dark_green"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['30','44.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["golden"], end_color=col_map["golden"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['45','59.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["sky"], end_color=col_map["sky"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['60','89.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["saddle"], end_color=col_map["saddle"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
             ]
 
             for rrule in rules:
@@ -151,6 +142,7 @@ def create_excel_with_doc_format(df: pd.DataFrame) -> bytes:
         except Exception:
             pass
 
+    # Auto-adjust widths
     try:
         for col in ws.columns:
             max_length = 0
@@ -171,14 +163,23 @@ def create_excel_with_doc_format(df: pd.DataFrame) -> bytes:
     return out.getvalue()
 
 def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name: str = "DataTable"):
+    """
+    Load an Excel template (xlsx/xlsm) and ensure there's an Excel Table named `table_name`.
+    - If the table exists: replace header+rows and update the table.ref.
+    - If the table is missing: create a new sheet named table_name or table_name_1 and add a Table.
+    Additionally apply conditional formatting (CellIs rules) to the DOC column.
+    Returns BytesIO of the modified workbook.
+    """
     from openpyxl.worksheet.table import Table, TableStyleInfo
     from openpyxl.formatting.rule import CellIsRule
     from openpyxl.styles import PatternFill, Font
 
+    # keep_vba=True so macros are preserved when template is xlsm
     wb = load_workbook(template_path, keep_vba=True)
     table_sheet = None
     table_obj = None
 
+    # 1) try to find existing table named table_name
     for ws in wb.worksheets:
         for tbl in ws._tables:
             if tbl.displayName == table_name:
@@ -188,28 +189,31 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
         if table_obj:
             break
 
+    # helper: parse A1 addresses
     def cell_to_rowcol(cell):
         import re
-
         m = re.match(r"([A-Z]+)(\d+)", cell)
         if not m:
             raise RuntimeError("Unexpected table ref format")
         col_letters, row = m.groups()
         col = 0
         for ch in col_letters:
-            col = col * 26 + (ord(ch) - ord("A") + 1)
+            col = col * 26 + (ord(ch) - ord('A') + 1)
         return int(row), col
 
     if table_obj is not None:
+        # update existing table
         ref = table_obj.ref
         start_cell, end_cell = ref.split(":")
         start_row, start_col = cell_to_rowcol(start_cell)
         end_row, end_col = cell_to_rowcol(end_cell)
 
+        # clear old rows under header
         for r in range(start_row + 1, end_row + 1):
             for c in range(start_col, end_col + 1):
                 table_sheet.cell(row=r, column=c).value = None
 
+        # write new header and rows
         header = list(df.columns)
         for idx, col_name in enumerate(header):
             table_sheet.cell(row=start_row, column=start_col + idx, value=col_name)
@@ -218,6 +222,7 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
             for c_idx, v in enumerate(row, start=start_col):
                 table_sheet.cell(row=r_idx, column=c_idx, value=v)
 
+        # update ref
         new_end_row = start_row + len(df)
         new_end_col = start_col + len(header) - 1
         table_obj.ref = f"{get_column_letter(start_col)}{start_row}:{get_column_letter(new_end_col)}{new_end_row}"
@@ -225,6 +230,7 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
         header_row_idx = start_row
         first_data_row = start_row + 1
     else:
+        # create a new sheet named table_name (avoid collisions)
         sheet_name = table_name
         base_name = sheet_name
         i = 1
@@ -249,9 +255,9 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
         header_row_idx = 1
         first_data_row = 2
 
-    header_cells = list(
-        target_ws.iter_rows(min_row=header_row_idx, max_row=header_row_idx, values_only=False)
-    )[0]
+    # --- apply conditional formatting to DOC column in target_ws ---
+    # find DOC column index by header row
+    header_cells = list(target_ws.iter_rows(min_row=header_row_idx, max_row=header_row_idx, values_only=False))[0]
     doc_col_idx = None
     for idx, cell in enumerate(header_cells, start=1):
         if cell.value and str(cell.value).strip().lower() == "doc":
@@ -279,49 +285,32 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
             col_letter = get_column_letter(doc_col_idx)
             rng = f"{col_letter}{first_data_row}:{col_letter}{last_row}"
 
+            # create rules for buckets using CellIsRule
             rules = [
-                CellIsRule(
-                    operator="between",
-                    formula=["0", "6.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["dark_red"], end_color=col_map["dark_red"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
-                CellIsRule(
-                    operator="between",
-                    formula=["7", "14.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["dark_orange"], end_color=col_map["dark_orange"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
-                CellIsRule(
-                    operator="between",
-                    formula=["15", "29.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["dark_green"], end_color=col_map["dark_green"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
-                CellIsRule(
-                    operator="between",
-                    formula=["30", "44.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["golden"], end_color=col_map["golden"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
-                CellIsRule(
-                    operator="between",
-                    formula=["45", "59.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["sky"], end_color=col_map["sky"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
-                CellIsRule(
-                    operator="between",
-                    formula=["60", "89.9999"],
-                    stopIfTrue=True,
-                    fill=PatternFill(start_color=col_map["saddle"], end_color=col_map["saddle"], fill_type="solid"),
-                    font=Font(color="FFFFFF"),
-                ),
+                CellIsRule(operator='between', formula=['0','6.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_red"], end_color=col_map["dark_red"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['7','14.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_orange"], end_color=col_map["dark_orange"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['15','29.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_green"], end_color=col_map["dark_green"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['30','44.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["golden"], end_color=col_map["golden"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['45','59.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["sky"], end_color=col_map["sky"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['60','89.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["saddle"], end_color=col_map["saddle"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
             ]
 
             for rrule in rules:
@@ -334,9 +323,14 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
     out.seek(0)
     return out
 
-def create_fallback_workbook(
-    df: pd.DataFrame, sort_desc: bool, sheet_name: str, parent_col: str = None, selected_brands=None
-):
+def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str, parent_col: str = None, selected_brands = None):
+    """
+    Create fallback workbook bytes (openpyxl) with:
+      - data sheet (DOC styling)
+      - PivotSummary (aggregated sums by Brand + parent)
+      - ChartData and Chart
+      - HowToPivot sheet
+    """
     colors = {
         "dark_red": "8B0000",
         "dark_orange": "FF8C00",
@@ -353,11 +347,7 @@ def create_fallback_workbook(
     working = working.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
     if parent_col and parent_col in working.columns:
-        agg = (
-            working.groupby(["Brand", parent_col], dropna=False)[["DOC", "DRR"]]
-            .sum()
-            .reset_index()
-        )
+        agg = working.groupby(["Brand", parent_col], dropna=False)[["DOC", "DRR"]].sum().reset_index()
         agg["Brand_Parent"] = agg["Brand"].astype(str) + " | " + agg[parent_col].astype(str)
     elif "Brand" in working.columns:
         agg = working.groupby(["Brand"], dropna=False)[["DOC", "DRR"]].sum().reset_index()
@@ -369,48 +359,33 @@ def create_fallback_workbook(
     ws = wb.active
     ws.title = sheet_name
 
+    # write data
     for r in dataframe_to_rows(working, index=False, header=True):
         ws.append(r)
 
+    # apply DOC fills
     try:
         if "DOC" in working.columns:
             doc_idx = list(working.columns).index("DOC") + 1
             from openpyxl.styles import PatternFill, Font
-
             def fill_for_val(v):
                 try:
                     v = float(v)
                 except:
-                    return PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid"), Font(
-                        color="000000"
-                    )
+                    return PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid"), Font(color="000000")
                 if 0 <= v < 7:
-                    return PatternFill(start_color=colors["dark_red"], end_color=colors["dark_red"], fill_type="solid"), Font(
-                        color="FFFFFF"
-                    )
+                    return PatternFill(start_color=colors["dark_red"], end_color=colors["dark_red"], fill_type="solid"), Font(color="FFFFFF")
                 if 7 <= v < 15:
-                    return PatternFill(
-                        start_color=colors["dark_orange"], end_color=colors["dark_orange"], fill_type="solid"
-                    ), Font(color="FFFFFF")
+                    return PatternFill(start_color=colors["dark_orange"], end_color=colors["dark_orange"], fill_type="solid"), Font(color="FFFFFF")
                 if 15 <= v < 30:
-                    return PatternFill(
-                        start_color=colors["dark_green"], end_color=colors["dark_green"], fill_type="solid"
-                    ), Font(color="FFFFFF")
+                    return PatternFill(start_color=colors["dark_green"], end_color=colors["dark_green"], fill_type="solid"), Font(color="FFFFFF")
                 if 30 <= v < 45:
-                    return PatternFill(start_color=colors["golden"], end_color=colors["golden"], fill_type="solid"), Font(
-                        color="FFFFFF"
-                    )
+                    return PatternFill(start_color=colors["golden"], end_color=colors["golden"], fill_type="solid"), Font(color="FFFFFF")
                 if 45 <= v < 60:
-                    return PatternFill(start_color=colors["sky"], end_color=colors["sky"], fill_type="solid"), Font(
-                        color="FFFFFF"
-                    )
+                    return PatternFill(start_color=colors["sky"], end_color=colors["sky"], fill_type="solid"), Font(color="FFFFFF")
                 if 60 <= v < 90:
-                    return PatternFill(
-                        start_color=colors["saddle"], end_color=colors["saddle"], fill_type="solid"
-                    ), Font(color="FFFFFF")
-                return PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid"), Font(
-                    color="000000"
-                )
+                    return PatternFill(start_color=colors["saddle"], end_color=colors["saddle"], fill_type="solid"), Font(color="FFFFFF")
+                return PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid"), Font(color="000000")
 
             for row in range(2, ws.max_row + 1):
                 cell = ws.cell(row=row, column=doc_idx)
@@ -420,9 +395,9 @@ def create_fallback_workbook(
     except Exception:
         pass
 
+    # add an Excel Table (DataTable)
     try:
         from openpyxl.worksheet.table import Table, TableStyleInfo
-
         max_row = ws.max_row
         max_col = ws.max_column
         ref = f"A1:{get_column_letter(max_col)}{max_row}"
@@ -432,16 +407,17 @@ def create_fallback_workbook(
     except Exception:
         pass
 
+    # PivotSummary
     ws_pivot = wb.create_sheet("PivotSummary")
     for r in dataframe_to_rows(agg, index=False, header=True):
         ws_pivot.append(r)
 
+    # apply DOC fills on PivotSummary
     try:
         headers = [c.value for c in ws_pivot[1]]
         if "DOC" in headers:
             doc_idx_p = headers.index("DOC") + 1
             from openpyxl.styles import PatternFill, Font
-
             for row in range(2, ws_pivot.max_row + 1):
                 cell = ws_pivot.cell(row=row, column=doc_idx_p)
                 try:
@@ -455,14 +431,10 @@ def create_fallback_workbook(
                     cell.fill = PatternFill(start_color=colors["dark_red"], end_color=colors["dark_red"], fill_type="solid")
                     cell.font = Font(color="FFFFFF")
                 elif 7 <= val < 15:
-                    cell.fill = PatternFill(
-                        start_color=colors["dark_orange"], end_color=colors["dark_orange"], fill_type="solid"
-                    )
+                    cell.fill = PatternFill(start_color=colors["dark_orange"], end_color=colors["dark_orange"], fill_type="solid")
                     cell.font = Font(color="FFFFFF")
                 elif 15 <= val < 30:
-                    cell.fill = PatternFill(
-                        start_color=colors["dark_green"], end_color=colors["dark_green"], fill_type="solid"
-                    )
+                    cell.fill = PatternFill(start_color=colors["dark_green"], end_color=colors["dark_green"], fill_type="solid")
                     cell.font = Font(color="FFFFFF")
                 elif 30 <= val < 45:
                     cell.fill = PatternFill(start_color=colors["golden"], end_color=colors["golden"], fill_type="solid")
@@ -471,9 +443,7 @@ def create_fallback_workbook(
                     cell.fill = PatternFill(start_color=colors["sky"], end_color=colors["sky"], fill_type="solid")
                     cell.font = Font(color="FFFFFF")
                 elif 60 <= val < 90:
-                    cell.fill = PatternFill(
-                        start_color=colors["saddle"], end_color=colors["saddle"], fill_type="solid"
-                    )
+                    cell.fill = PatternFill(start_color=colors["saddle"], end_color=colors["saddle"], fill_type="solid")
                     cell.font = Font(color="FFFFFF")
                 else:
                     cell.fill = PatternFill(start_color=colors["white"], end_color=colors["white"], fill_type="solid")
@@ -481,13 +451,13 @@ def create_fallback_workbook(
     except Exception:
         pass
 
+    # ChartData + Chart
     ws_chartdata = wb.create_sheet("ChartData")
     if not agg.empty:
         for r in dataframe_to_rows(agg[["Brand_Parent", "DOC", "DRR"]], index=False, header=True):
             ws_chartdata.append(r)
         try:
             from openpyxl.chart import BarChart, Reference
-
             if ws_chartdata.max_row > 1:
                 chart = BarChart()
                 cats = Reference(ws_chartdata, min_col=1, min_row=2, max_row=ws_chartdata.max_row)
@@ -502,15 +472,16 @@ def create_fallback_workbook(
         except Exception:
             pass
 
+    # HowToPivot
     try:
         how = wb.create_sheet("HowToPivot")
         how.append(["How to create interactive PivotTable + Slicer in Excel (no VBA)"])
         how.append([])
         how.append(["1) In Excel: Insert → PivotTable"])
-        how.append(["   - Select the table named 'DataTable' on the sheet: " + sheet_name])
+        how.append([f"   - Select the table named 'DataTable' on the sheet: {sheet_name if 'sheet_name' in locals() else 'Data'}"])
         how.append(["   - Place the PivotTable on a new worksheet."])
         how.append([])
-        how.append(["2) In PivotField list: drag 'Brand' and '(Parent) ASIN' into Rows (Brand first)."])
+        how.append(["2) In PivotField list: drag 'Brand' and '(Parent) ASIN' (or your parent column) into Rows (Brand first)."])
         how.append(["   - Drag 'DOC' and 'DRR' into Values (set aggregation = Sum)."])
         how.append([])
         how.append(["3) To add a Slicer: Insert → Slicer → choose 'Brand' and '(Parent) ASIN'."])
@@ -577,28 +548,18 @@ if st.button("🚀 Process Data"):
                 inventory.columns = inventory.columns.str.strip()
                 inventory.iloc[:, 0] = inventory.iloc[:, 0].astype(str)
 
-                # PM columns C:G
+                # process pm columns C:G
                 pm = pm.iloc[:, 2:7]
                 pm.columns = ["Amazon Sku Name", "D", "Brand Manager", "F", "Brand"]
                 pm["Amazon Sku Name"] = pm["Amazon Sku Name"].astype(str)
 
-                original = original.merge(
-                    pm[["Amazon Sku Name", "Brand Manager"]],
-                    how="left",
-                    left_on="SKU",
-                    right_on="Amazon Sku Name",
-                )
+                original = original.merge(pm[["Amazon Sku Name", "Brand Manager"]], how="left", left_on="SKU", right_on="Amazon Sku Name")
                 if "Title" in original.columns and "Brand Manager" in original.columns:
                     insert_pos = original.columns.get_loc("Title")
                     col = original.pop("Brand Manager")
                     original.insert(insert_pos, "Brand Manager", col)
 
-                original = original.merge(
-                    pm[["Amazon Sku Name", "Brand"]],
-                    how="left",
-                    left_on="SKU",
-                    right_on="Amazon Sku Name",
-                )
+                original = original.merge(pm[["Amazon Sku Name", "Brand"]], how="left", left_on="SKU", right_on="Amazon Sku Name")
                 if "Title" in original.columns and "Brand" in original.columns:
                     insert_pos = original.columns.get_loc("Title")
                     col = original.pop("Brand")
@@ -619,7 +580,7 @@ if st.button("🚀 Process Data"):
                 else:
                     original["afn-reserved-quantity"] = 0
 
-                # DRR & DOC
+                # clean & compute DRR/DOC
                 if "Total Order Items" in original.columns:
                     original["Total Order Items"] = (
                         original["Total Order Items"]
@@ -628,26 +589,18 @@ if st.button("🚀 Process Data"):
                         .str.replace(",", "", regex=False)
                         .str.replace(r"[^\d\.\-]", "", regex=True)
                     )
-                    original["Total Order Items"] = pd.to_numeric(
-                        original["Total Order Items"], errors="coerce"
-                    )
+                    original["Total Order Items"] = pd.to_numeric(original["Total Order Items"], errors="coerce")
                 else:
                     original["Total Order Items"] = 0
 
                 original["DRR"] = (original["Total Order Items"] / no_of_days).round(2)
-
-                original["afn-fulfillable-quantity"] = pd.to_numeric(
-                    original["afn-fulfillable-quantity"], errors="coerce"
-                )
-                original["afn-fulfillable-quantity"] = original["afn-fulfillable-quantity"].fillna(0)
-
+                original["afn-fulfillable-quantity"] = pd.to_numeric(original["afn-fulfillable-quantity"], errors="coerce")
                 original["DOC"] = (original["afn-fulfillable-quantity"] / original["DRR"]).round(2)
                 original["DOC"] = original["DOC"].replace([float("inf"), float("-inf")], 0)
-                original["DOC"] = original["DOC"].fillna(0)
 
                 st.success("✅ Data processed successfully!")
 
-                # metrics
+                # display metrics
                 st.header("📈 Processed Results")
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
@@ -676,13 +629,15 @@ if st.button("🚀 Process Data"):
                 display_cols = [col for col in display_cols if col in original.columns]
                 display_df = original[display_cols].copy()
                 styled_df = display_df.style.map(color_doc, subset=["DOC"])
+
                 st.dataframe(styled_df, width="stretch", height=600)
 
                 st.markdown("---")
 
-                # Excel export
+                # Excel export UI (template-first)
                 colA, colB = st.columns(2)
                 with colA:
+                    # plain CSV download
                     csv_buf = io.StringIO()
                     original.to_csv(csv_buf, index=False)
                     st.download_button(
@@ -692,6 +647,7 @@ if st.button("🚀 Process Data"):
                         mime="text/csv",
                     )
 
+                    # XLSX download that looks like CSV but with DOC conditional formatting
                     xlsx_bytes = create_excel_with_doc_format(original)
                     st.download_button(
                         "📥 Download CSV as Excel (DOC formatted)",
@@ -707,96 +663,50 @@ if st.button("🚀 Process Data"):
 
                     if over or oos:
                         sort_desc = True if over else False
-
+                        # detect parent col
                         parent_col = None
                         for c in original.columns:
-                            cle = (
-                                c.lower()
-                                .replace(" ", "")
-                                .replace("_", "")
-                                .replace("(", "")
-                                .replace(")", "")
-                            )
+                            cle = c.lower().replace(" ", "").replace("_", "").replace("(", "").replace(")", "")
                             if "parent" in cle:
                                 parent_col = c
                                 break
 
-                        brands = (
-                            sorted(original["Brand"].dropna().astype(str).unique().tolist())
-                            if "Brand" in original.columns
-                            else []
-                        )
-                        selected = st.multiselect(
-                            "Filter brands for export (leave empty = all)",
-                            options=brands,
-                            default=brands,
-                        )
+                        brands = sorted(original["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in original.columns else []
+                        selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
 
+                        # prepare export df
                         df_export = original.copy()
                         if selected:
                             df_export = df_export[df_export["Brand"].isin(selected)].copy()
-
-                        # ensure numeric again (defensive)
-                        if "afn-fulfillable-quantity" in df_export.columns:
-                            df_export["afn-fulfillable-quantity"] = pd.to_numeric(
-                                df_export["afn-fulfillable-quantity"], errors="coerce"
-                            ).fillna(0)
-                        if "DOC" in df_export.columns:
-                            df_export["DOC"] = pd.to_numeric(df_export["DOC"], errors="coerce").fillna(0)
-
-                        # OOS: qty == 0
-                        if oos and "afn-fulfillable-quantity" in df_export.columns:
-                            df_export = df_export[df_export["afn-fulfillable-quantity"] == 0].copy()
-
-                        # Overstock: DOC > 90
-                        if over and "DOC" in df_export.columns:
-                            df_export = df_export[df_export["DOC"] > 90].copy()
-
                         df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
-                        st.info(f"Rows in exported file: {len(df_export)}")
-
+                        # template detection: prefer macro-enabled .xlsm if present
                         base_dir = os.path.dirname(__file__)
                         tmpl_xlsm = os.path.join(base_dir, "pivot_template.xlsm")
                         tmpl_xlsx = os.path.join(base_dir, "pivot_template.xlsx")
-                        template_path = (
-                            tmpl_xlsm
-                            if os.path.exists(tmpl_xlsm)
-                            else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
-                        )
+                        template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
 
                         final_bytes = None
                         template_used = False
+                        template_error = None
 
                         if template_path:
                             try:
-                                buf = fill_template_and_get_bytes(
-                                    template_path, df_export, table_name="DataTable"
-                                )
+                                buf = fill_template_and_get_bytes(template_path, df_export, table_name="DataTable")
                                 final_bytes = buf.getvalue()
                                 template_used = True
-                                st.success(
-                                    "✅ Used pivot template — Pivot/Slicer included when opened in Excel."
-                                )
-                            except Exception:
-                                st.warning(
-                                    "⚠️ Template found but failed to be filled programmatically. Falling back to generated workbook."
-                                )
-                                st.code(traceback.format_exc())
+                                st.success("✅ Used pivot template — Pivot/Slicer included when opened in Excel.")
+                            except Exception as te:
+                                template_error = traceback.format_exc()
+                                st.warning("⚠️ Template found but failed to be filled programmatically. Falling back to generated workbook.")
+                                st.code(template_error)
 
                         if final_bytes is None:
-                            fallback_buf = create_fallback_workbook(
-                                df_export,
-                                sort_desc=sort_desc,
-                                sheet_name="Overstock" if sort_desc else "OOS",
-                                parent_col=parent_col,
-                                selected_brands=selected,
-                            )
+                            fallback_buf = create_fallback_workbook(df_export, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", parent_col=parent_col, selected_brands=selected)
                             final_bytes = fallback_buf.getvalue()
-                            st.info(
-                                "ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot)."
-                            )
+                            st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
+                        # pick correct extension & mime based on template vs fallback
                         if template_path and template_used and template_path.lower().endswith(".xlsm"):
                             dl_ext = ".xlsm"
                             dl_mime = "application/vnd.ms-excel.sheet.macroEnabled.12"
@@ -804,9 +714,7 @@ if st.button("🚀 Process Data"):
                             dl_ext = ".xlsx"
                             dl_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-                        file_basename = (
-                            f"{'overstock' if sort_desc else 'oos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                        )
+                        file_basename = f"{'overstock' if sort_desc else 'oos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                         file_name = file_basename + dl_ext
 
                         st.download_button(
@@ -816,12 +724,14 @@ if st.button("🚀 Process Data"):
                             mime=dl_mime,
                         )
 
+                # persist processed data
                 st.session_state["processed_data"] = original
 
             except Exception as e:
                 st.error("❌ Processing failed.")
                 st.exception(e)
 
+# previously processed view
 elif "processed_data" in st.session_state:
     orig = st.session_state["processed_data"]
     st.header("📈 Previously Processed Results")
@@ -856,6 +766,7 @@ elif "processed_data" in st.session_state:
     st.markdown("---")
     cA, cB = st.columns(2)
     with cA:
+        # plain CSV download
         csv_buf = io.StringIO()
         orig.to_csv(csv_buf, index=False)
         st.download_button(
@@ -865,6 +776,7 @@ elif "processed_data" in st.session_state:
             mime="text/csv",
         )
 
+        # XLSX download that looks like CSV but with DOC conditional formatting
         xlsx_bytes_prev = create_excel_with_doc_format(orig)
         st.download_button(
             "📥 Download CSV as Excel (DOC formatted)",
@@ -882,55 +794,22 @@ elif "processed_data" in st.session_state:
             sort_desc = True if over2 else False
             parent_col = None
             for c in orig.columns:
-                cle = (
-                    c.lower()
-                    .replace(" ", "")
-                    .replace("_", "")
-                    .replace("(", "")
-                    .replace(")", "")
-                )
+                cle = c.lower().replace(" ", "").replace("_", "").replace("(", "").replace(")", "")
                 if "parent" in cle:
                     parent_col = c
                     break
-            brands = (
-                sorted(orig["Brand"].dropna().astype(str).unique().tolist())
-                if "Brand" in orig.columns
-                else []
-            )
-            selected = st.multiselect(
-                "Filter brands for export (leave empty = all)",
-                options=brands,
-                default=brands,
-            )
+            brands = sorted(orig["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in orig.columns else []
+            selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
 
             df_export = orig.copy()
             if selected:
                 df_export = df_export[df_export["Brand"].isin(selected)].copy()
-
-            if "afn-fulfillable-quantity" in df_export.columns:
-                df_export["afn-fulfillable-quantity"] = pd.to_numeric(
-                    df_export["afn-fulfillable-quantity"], errors="coerce"
-                ).fillna(0)
-            if "DOC" in df_export.columns:
-                df_export["DOC"] = pd.to_numeric(df_export["DOC"], errors="coerce").fillna(0)
-
-            if oos2 and "afn-fulfillable-quantity" in df_export.columns:
-                df_export = df_export[df_export["afn-fulfillable-quantity"] == 0].copy()
-
-            if over2 and "DOC" in df_export.columns:
-                df_export = df_export[df_export["DOC"] > 90].copy()
-
             df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
-            st.info(f"(Previous) rows in exported file: {len(df_export)}")
 
             base_dir = os.path.dirname(__file__)
             tmpl_xlsm = os.path.join(base_dir, "pivot_template.xlsm")
             tmpl_xlsx = os.path.join(base_dir, "pivot_template.xlsx")
-            template_path = (
-                tmpl_xlsm
-                if os.path.exists(tmpl_xlsm)
-                else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
-            )
+            template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
 
             final_bytes = None
             template_used = False
@@ -941,25 +820,16 @@ elif "processed_data" in st.session_state:
                     final_bytes = buf.getvalue()
                     template_used = True
                     st.success("✅ Used pivot template — Pivot/Slicer included when opened in Excel.")
-                except Exception:
-                    st.warning(
-                        "⚠️ Template found but failed to be filled programmatically. Falling back to generated workbook."
-                    )
+                except Exception as te:
+                    st.warning("⚠️ Template found but failed to be filled programmatically. Falling back to generated workbook.")
                     st.code(traceback.format_exc())
 
             if final_bytes is None:
-                fallback_buf = create_fallback_workbook(
-                    df_export,
-                    sort_desc=sort_desc,
-                    sheet_name="Overstock" if sort_desc else "OOS",
-                    parent_col=parent_col,
-                    selected_brands=selected,
-                )
+                fallback_buf = create_fallback_workbook(df_export, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", parent_col=parent_col, selected_brands=selected)
                 final_bytes = fallback_buf.getvalue()
-                st.info(
-                    "ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot)."
-                )
+                st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
+            # pick correct extension & mime based on template vs fallback
             if template_path and template_used and template_path.lower().endswith(".xlsm"):
                 dl_ext = ".xlsm"
                 dl_mime = "application/vnd.ms-excel.sheet.macroEnabled.12"
@@ -977,8 +847,6 @@ elif "processed_data" in st.session_state:
                 mime=dl_mime,
             )
 
+# footer
 st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: #666; padding: 10px;'>Inventory Analysis Dashboard | Built with Streamlit</div>",
-    unsafe_allow_html=True,
-)
+st.markdown("<div style='text-align: center; color: #666; padding: 10px;'>Inventory Analysis Dashboard | Built with Streamlit</div>", unsafe_allow_html=True)
