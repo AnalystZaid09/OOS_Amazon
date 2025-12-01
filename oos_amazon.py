@@ -174,6 +174,7 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
     from openpyxl.formatting.rule import CellIsRule
     from openpyxl.styles import PatternFill, Font
 
+    # keep_vba=True so macros are preserved when template is xlsm
     wb = load_workbook(template_path, keep_vba=True)
     table_sheet = None
     table_obj = None
@@ -705,11 +706,22 @@ if st.button("🚀 Process Data"):
                             final_bytes = fallback_buf.getvalue()
                             st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
+                        # pick correct extension & mime based on template vs fallback
+                        if template_path and template_used and template_path.lower().endswith(".xlsm"):
+                            dl_ext = ".xlsm"
+                            dl_mime = "application/vnd.ms-excel.sheet.macroEnabled.12"
+                        else:
+                            dl_ext = ".xlsx"
+                            dl_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+                        file_basename = f"{'overstock' if sort_desc else 'oos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        file_name = file_basename + dl_ext
+
                         st.download_button(
                             label="Download Excel workbook",
                             data=final_bytes,
-                            file_name=f"{'overstock' if sort_desc else 'oos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            file_name=file_name,
+                            mime=dl_mime,
                         )
 
                 # persist processed data
@@ -800,10 +812,13 @@ elif "processed_data" in st.session_state:
             template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
 
             final_bytes = None
+            template_used = False
+
             if template_path:
                 try:
                     buf = fill_template_and_get_bytes(template_path, df_export, table_name="DataTable")
                     final_bytes = buf.getvalue()
+                    template_used = True
                     st.success("✅ Used pivot template — Pivot/Slicer included when opened in Excel.")
                 except Exception as te:
                     st.warning("⚠️ Template found but failed to be filled programmatically. Falling back to generated workbook.")
@@ -814,11 +829,22 @@ elif "processed_data" in st.session_state:
                 final_bytes = fallback_buf.getvalue()
                 st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
+            # pick correct extension & mime based on template vs fallback
+            if template_path and template_used and template_path.lower().endswith(".xlsm"):
+                dl_ext = ".xlsm"
+                dl_mime = "application/vnd.ms-excel.sheet.macroEnabled.12"
+            else:
+                dl_ext = ".xlsx"
+                dl_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+            file_basename = f"{'overstock' if sort_desc else 'oos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            file_name = file_basename + dl_ext
+
             st.download_button(
                 label="Download Excel workbook",
                 data=final_bytes,
-                file_name=f"{'overstock' if sort_desc else 'oos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                file_name=file_name,
+                mime=dl_mime,
             )
 
 # footer
