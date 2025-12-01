@@ -3,7 +3,6 @@ import streamlit as st
 import pandas as pd
 import io
 import os
-import tempfile
 import traceback
 from datetime import datetime
 from openpyxl import Workbook, load_workbook
@@ -43,7 +42,7 @@ st.markdown(
 )
 
 # -------------------------
-# Helper: color_doc used for displayed DataFrame styling (returns CSS string)
+# Helpers
 # -------------------------
 def color_doc(val):
     try:
@@ -65,20 +64,21 @@ def color_doc(val):
     except:
         return ""
 
-# -------------------------
-# Helper: fill a pre-built pivot template (must contain a Table named DataTable)
-# -------------------------
 def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name: str = "DataTable"):
     """
-    Load template_path (containing a table named table_name), replace that table's contents with df,
-    update table reference, and return BytesIO of the modified workbook.
+    Load template_path and ensure there's an Excel Table named `table_name`.
+    - If the table exists: replace its header + rows with df and update the table.ref.
+    - If the table does NOT exist: create a new worksheet named table_name (or table_name_1 if conflict),
+      write df there and add an Excel Table named table_name.
+    Return BytesIO of modified workbook.
     """
-    from openpyxl.worksheet.table import Table
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+
     wb = load_workbook(template_path)
     table_sheet = None
     table_obj = None
 
-    # find the table object
+    # 1) Try to find existing table by name
     for ws in wb.worksheets:
         for tbl in ws._tables:
             if tbl.displayName == table_name:
@@ -88,63 +88,80 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
         if table_obj:
             break
 
-    if table_obj is None:
-        raise RuntimeError(f"Template does not contain a table named '{table_name}'. Please create it in Excel (see instructions).")
+    if table_obj is not None:
+        # existing table: replace header + rows and update ref
+        ref = table_obj.ref
+        start_cell, end_cell = ref.split(":")
+        def cell_to_rowcol(cell):
+            import re
+            m = re.match(r"([A-Z]+)(\d+)", cell)
+            if not m:
+                raise RuntimeError("Unexpected table ref format")
+            col_letters, row = m.groups()
+            col = 0
+            for ch in col_letters:
+                col = col * 26 + (ord(ch) - ord('A') + 1)
+            return int(row), col
 
-    # parse current ref like "A1:G10"
-    ref = table_obj.ref
-    start_cell, end_cell = ref.split(":")
-    def cell_to_rowcol(cell):
-        import re
-        m = re.match(r"([A-Z]+)(\d+)", cell)
-        if not m:
-            raise RuntimeError("Unexpected table ref format")
-        col_letters, row = m.groups()
-        col = 0
-        for ch in col_letters:
-            col = col * 26 + (ord(ch) - ord('A') + 1)
-        return int(row), col
+        start_row, start_col = cell_to_rowcol(start_cell)
+        end_row, end_col = cell_to_rowcol(end_cell)
 
-    start_row, start_col = cell_to_rowcol(start_cell)
+        # clear existing rows under the header
+        for r in range(start_row + 1, end_row + 1):
+            for c in range(start_col, end_col + 1):
+                table_sheet.cell(row=r, column=c).value = None
 
-    # clear existing rows under header
-    end_row, end_col = cell_to_rowcol(end_cell)
-    for r in range(start_row + 1, end_row + 1):
-        for c in range(start_col, end_col + 1):
-            table_sheet.cell(row=r, column=c).value = None
+        # write new header & rows
+        header = list(df.columns)
+        for idx, col_name in enumerate(header):
+            table_sheet.cell(row=start_row, column=start_col + idx, value=col_name)
 
-    # write header
-    header = list(df.columns)
-    for idx, col_name in enumerate(header):
-        table_sheet.cell(row=start_row, column=start_col + idx, value=col_name)
+        for r_idx, row in enumerate(df.itertuples(index=False, name=None), start=start_row + 1):
+            for c_idx, v in enumerate(row, start=start_col):
+                table_sheet.cell(row=r_idx, column=c_idx, value=v)
 
-    # write data rows
-    for r_idx, row in enumerate(df.itertuples(index=False, name=None), start=start_row + 1):
-        for c_idx, v in enumerate(row, start=start_col):
-            table_sheet.cell(row=r_idx, column=c_idx, value=v)
+        # update table ref
+        new_end_row = start_row + len(df)
+        new_end_col = start_col + len(header) - 1
+        table_obj.ref = f"{get_column_letter(start_col)}{start_row}:{get_column_letter(new_end_col)}{new_end_row}"
 
-    # update table ref
-    new_end_row = start_row + len(df)
-    new_end_col = start_col + len(header) - 1
-    new_ref = f"{get_column_letter(start_col)}{start_row}:{get_column_letter(new_end_col)}{new_end_row}"
-    table_obj.ref = new_ref
+    else:
+        # table not found -> create a new sheet named table_name (if name exists, append suffix)
+        sheet_name = table_name
+        base_name = sheet_name
+        i = 1
+        while sheet_name in [ws.title for ws in wb.worksheets]:
+            sheet_name = f"{base_name}_{i}"
+            i += 1
+        ws = wb.create_sheet(sheet_name)
 
+        # write header + data
+        header = list(df.columns)
+        ws.append(header)
+        for row in df.itertuples(index=False, name=None):
+            ws.append(row)
+
+        # create an Excel Table over the written range
+        max_row = ws.max_row
+        max_col = ws.max_column
+        ref = f"A1:{get_column_letter(max_col)}{max_row}"
+        table = Table(displayName=table_name, ref=ref)
+        table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium9", showRowStripes=True)
+        ws.add_table(table)
+
+    # Save to bytes and return
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
     return out
 
-# -------------------------
-# Helper: fallback workbook generator using openpyxl (DataTable + PivotSummary + ChartData + Chart + HowToPivot)
-# -------------------------
 def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str, parent_col: str = None, selected_brands = None):
     """
-    Create fallback workbook bytes when no pivot_template.xlsx is present.
-    It includes:
-      - A sorted data sheet named sheet_name (DOC formatting applied).
-      - A PivotSummary aggregated sheet by Brand + parent_col (sum of DOC & DRR).
-      - ChartData and Chart sheets.
-      - HowToPivot instructions.
+    Create fallback workbook bytes (openpyxl) with:
+      - data sheet (DOC styling)
+      - PivotSummary (aggregated sums by Brand + parent)
+      - ChartData and Chart
+      - HowToPivot sheet
     """
     colors = {
         "dark_red": "8B0000",
@@ -156,13 +173,11 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
         "white": "FFFFFF",
     }
 
-    # filter by brands if provided
     working = df.copy()
     if selected_brands:
         working = working[working["Brand"].isin(selected_brands)].copy()
     working = working.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
-    # prepare agg by Brand + parent
     if parent_col and parent_col in working.columns:
         agg = working.groupby(["Brand", parent_col], dropna=False)[["DOC", "DRR"]].sum().reset_index()
         agg["Brand_Parent"] = agg["Brand"].astype(str) + " | " + agg[parent_col].astype(str)
@@ -176,11 +191,11 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     ws = wb.active
     ws.title = sheet_name
 
-    # write data with header
+    # write data
     for r in dataframe_to_rows(working, index=False, header=True):
         ws.append(r)
 
-    # apply DOC fills by direct cell styling
+    # apply DOC fills
     try:
         if "DOC" in working.columns:
             doc_idx = list(working.columns).index("DOC") + 1
@@ -212,7 +227,7 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     except Exception:
         pass
 
-    # try to create an Excel Table for DataTable (so user can quickly create Pivot)
+    # add an Excel Table (DataTable) to be useful for users
     try:
         from openpyxl.worksheet.table import Table, TableStyleInfo
         max_row = ws.max_row
@@ -224,12 +239,12 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     except Exception:
         pass
 
-    # PivotSummary sheet
+    # PivotSummary
     ws_pivot = wb.create_sheet("PivotSummary")
     for r in dataframe_to_rows(agg, index=False, header=True):
         ws_pivot.append(r)
 
-    # apply DOC fills on PivotSummary if present
+    # apply DOC fills on PivotSummary
     try:
         headers = [c.value for c in ws_pivot[1]]
         if "DOC" in headers:
@@ -268,13 +283,11 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     except Exception:
         pass
 
-    # ChartData sheet
+    # ChartData
     ws_chartdata = wb.create_sheet("ChartData")
     if not agg.empty:
         for r in dataframe_to_rows(agg[["Brand_Parent", "DOC", "DRR"]], index=False, header=True):
             ws_chartdata.append(r)
-
-        # Create a bar chart
         try:
             from openpyxl.chart import BarChart, Reference
             if ws_chartdata.max_row > 1:
@@ -313,7 +326,7 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     return buf
 
 # -------------------------
-# UI: file upload and processing (keeps your original logic)
+# UI: file upload + processing (keeps your original logic)
 # -------------------------
 st.title("📊 Inventory Analysis Dashboard")
 st.markdown("Upload your files and analyze inventory with Days of Coverage (DOC) calculations")
@@ -345,7 +358,6 @@ with col3:
 
 st.markdown("---")
 
-# Process button
 if st.button("🚀 Process Data"):
     if business_file is None or pm_file is None or inventory_file is None:
         st.error("⚠️ Please upload all three files before processing!")
@@ -356,11 +368,9 @@ if st.button("🚀 Process Data"):
             try:
                 original = pd.read_csv(business_file)
 
-                # SKU as str
                 if "SKU" in original.columns:
                     original["SKU"] = original["SKU"].astype(str)
 
-                # read pm
                 if pm_file.name.endswith(".xlsx"):
                     pm = pd.read_excel(pm_file)
                 else:
@@ -370,7 +380,7 @@ if st.button("🚀 Process Data"):
                 inventory.columns = inventory.columns.str.strip()
                 inventory.iloc[:, 0] = inventory.iloc[:, 0].astype(str)
 
-                # process pm (columns C-G -> indices 2:7)
+                # process pm
                 pm = pm.iloc[:, 2:7]
                 pm.columns = ["Amazon Sku Name", "D", "Brand Manager", "F", "Brand"]
                 pm["Amazon Sku Name"] = pm["Amazon Sku Name"].astype(str)
@@ -387,7 +397,7 @@ if st.button("🚀 Process Data"):
                     col = original.pop("Brand")
                     original.insert(insert_pos, "Brand", col)
 
-                # map inventory
+                # inventory mapping
                 if inventory.shape[1] > 10:
                     return_col = inventory.columns[10]
                     mi_map = inventory.set_index(inventory.columns[0])[return_col]
@@ -402,7 +412,7 @@ if st.button("🚀 Process Data"):
                 else:
                     original["afn-reserved-quantity"] = 0
 
-                # clean and compute DRR
+                # clean & compute DRR/DOC
                 if "Total Order Items" in original.columns:
                     original["Total Order Items"] = (
                         original["Total Order Items"]
@@ -422,7 +432,7 @@ if st.button("🚀 Process Data"):
 
                 st.success("✅ Data processed successfully!")
 
-                # metrics
+                # display metrics
                 st.header("📈 Processed Results")
                 c1, c2, c3, c4 = st.columns(4)
                 with c1:
@@ -452,12 +462,11 @@ if st.button("🚀 Process Data"):
                 display_df = original[display_cols].copy()
                 styled_df = display_df.style.map(color_doc, subset=["DOC"])
 
-                # updated Streamlit API: width instead of use_container_width
                 st.dataframe(styled_df, width="stretch", height=600)
 
                 st.markdown("---")
 
-                # Excel exports (template-first)
+                # Excel export UI (template-first)
                 colA, colB = st.columns(2)
                 with colA:
                     csv_buf = io.StringIO()
@@ -487,13 +496,12 @@ if st.button("🚀 Process Data"):
                         brands = sorted(original["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in original.columns else []
                         selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
 
-                        # prepare dataframe for export
+                        # prepare export df
                         df_export = original.copy()
                         if selected:
                             df_export = df_export[df_export["Brand"].isin(selected)].copy()
                         df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
-                        # 1) Try pivot template
                         template_path = os.path.join(os.path.dirname(__file__), "pivot_template.xlsx")
                         final_bytes = None
                         template_used = False
@@ -510,13 +518,11 @@ if st.button("🚀 Process Data"):
                                 st.warning("⚠️ pivot_template.xlsx found but failed to be filled programmatically. Falling back to generated workbook.")
                                 st.code(template_error)
 
-                        # 2) Fallback: create workbook programmatically
                         if final_bytes is None:
                             fallback_buf = create_fallback_workbook(df_export, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", parent_col=parent_col, selected_brands=selected)
                             final_bytes = fallback_buf.getvalue()
                             st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
-                        # deliver download
                         st.download_button(
                             label="Download Excel workbook",
                             data=final_bytes,
@@ -524,14 +530,14 @@ if st.button("🚀 Process Data"):
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         )
 
-                # persist
+                # persist processed data
                 st.session_state["processed_data"] = original
 
             except Exception as e:
                 st.error("❌ Processing failed.")
                 st.exception(e)
 
-# show previously processed
+# previously processed view
 elif "processed_data" in st.session_state:
     orig = st.session_state["processed_data"]
     st.header("📈 Previously Processed Results")
