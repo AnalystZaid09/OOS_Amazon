@@ -678,6 +678,19 @@ if st.button("🚀 Process Data"):
                         df_export = original.copy()
                         if selected:
                             df_export = df_export[df_export["Brand"].isin(selected)].copy()
+
+                        # === FILTERING LOGIC ===
+                        if oos and "afn-fulfillable-quantity" in df_export.columns:
+                            # OOS: 0–10 units
+                            df_export = df_export[
+                                (df_export["afn-fulfillable-quantity"] >= 0) &
+                                (df_export["afn-fulfillable-quantity"] <= 10)
+                            ].copy()
+
+                        if over and "afn-fulfillable-quantity" in df_export.columns:
+                            # Overstock: > 90 units
+                            df_export = df_export[df_export["afn-fulfillable-quantity"] > 90].copy()
+
                         df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
                         # template detection: prefer macro-enabled .xlsm if present
@@ -702,7 +715,13 @@ if st.button("🚀 Process Data"):
                                 st.code(template_error)
 
                         if final_bytes is None:
-                            fallback_buf = create_fallback_workbook(df_export, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", parent_col=parent_col, selected_brands=selected)
+                            fallback_buf = create_fallback_workbook(
+                                df_export,
+                                sort_desc=sort_desc,
+                                sheet_name="Overstock" if sort_desc else "OOS",
+                                parent_col=parent_col,
+                                selected_brands=selected,
+                            )
                             final_bytes = fallback_buf.getvalue()
                             st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
@@ -804,6 +823,19 @@ elif "processed_data" in st.session_state:
             df_export = orig.copy()
             if selected:
                 df_export = df_export[df_export["Brand"].isin(selected)].copy()
+
+            # === FILTERING LOGIC (PREVIOUS DATA) ===
+            if oos2 and "afn-fulfillable-quantity" in df_export.columns:
+                # OOS: 0–10 units
+                df_export = df_export[
+                    (df_export["afn-fulfillable-quantity"] >= 0) &
+                    (df_export["afn-fulfillable-quantity"] <= 10)
+                ].copy()
+
+            if over2 and "afn-fulfillable-quantity" in df_export.columns:
+                # Overstock: > 90 units
+                df_export = df_export[df_export["afn-fulfillable-quantity"] > 90].copy()
+
             df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
             base_dir = os.path.dirname(__file__)
@@ -825,7 +857,13 @@ elif "processed_data" in st.session_state:
                     st.code(traceback.format_exc())
 
             if final_bytes is None:
-                fallback_buf = create_fallback_workbook(df_export, sort_desc=sort_desc, sheet_name="Overstock" if sort_desc else "OOS", parent_col=parent_col, selected_brands=selected)
+                fallback_buf = create_fallback_workbook(
+                    df_export,
+                    sort_desc=sort_desc,
+                    sheet_name="Overstock" if sort_desc else "OOS",
+                    parent_col=parent_col,
+                    selected_brands=selected,
+                )
                 final_bytes = fallback_buf.getvalue()
                 st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
 
