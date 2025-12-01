@@ -65,17 +65,22 @@ def color_doc(val):
         return ""
 
 def filter_oos(df: pd.DataFrame) -> pd.DataFrame:
-    """OOS = afn-fulfillable-quantity == 0"""
+    """
+    OOS = sirf woh rows jisme afn-fulfillable-quantity == 0
+    (exact zero; NaN / blanks include nahi honge)
+    """
     col = "afn-fulfillable-quantity"
     if col not in df.columns:
         return df.iloc[0:0].copy()
-    return df[df[col].fillna(0) == 0].copy()
+    return df[df[col] == 0].copy()
 
 def filter_overstock(df: pd.DataFrame, threshold: float = 90.0) -> pd.DataFrame:
-    """Overstock = DOC > threshold (default 90)"""
+    """
+    Overstock = sirf woh rows jisme DOC >= threshold (default 90)
+    """
     if "DOC" not in df.columns:
         return df.iloc[0:0].copy()
-    return df[df["DOC"].fillna(0) > threshold].copy()
+    return df[df["DOC"] >= threshold].copy()
 
 def create_excel_with_doc_format(df: pd.DataFrame) -> bytes:
     """
@@ -644,7 +649,7 @@ if st.button("🚀 Process Data"):
                 # View mode: All / OOS / Overstock
                 view_mode = st.radio(
                     "View data for:",
-                    ["All", "OOS (afn-fulfillable-quantity = 0)", "Overstock (DOC > 90)"],
+                    ["All", "OOS (afn-fulfillable-quantity = 0)", "Overstock (DOC ≥ 90)"],
                     index=0,
                     horizontal=True,
                 )
@@ -704,7 +709,7 @@ if st.button("🚀 Process Data"):
 
                         # base df (apply OOS / Overstock filters)
                         if over:
-                            # Overstock: DOC > 90
+                            # Overstock: DOC >= 90
                             df_export = filter_overstock(original).copy()
                         else:
                             # OOS: afn-fulfillable-quantity == 0
@@ -789,7 +794,7 @@ elif "processed_data" in st.session_state:
     with c3:
         st.metric("Average DOC", f"{orig['DOC'].mean():.2f} days")
     with c4:
-        st.metric("Total Orders", f"{orig['Total Order Items'].sum():,.0f}")
+        st.metric("Total Orders", f"{orig['Total Order Items"].sum():,.0f}")
 
     st.markdown("---")
     display_cols = [
