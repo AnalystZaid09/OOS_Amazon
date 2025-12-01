@@ -64,6 +64,21 @@ def color_doc(val):
     except:
         return ""
 
+def filter_oos(df: pd.DataFrame) -> pd.DataFrame:
+    """OOS: sirf afn-fulfillable-quantity == 0"""
+    col = "afn-fulfillable-quantity"
+    if col not in df.columns:
+        return df.iloc[0:0].copy()
+    qty = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df[qty == 0].copy()
+
+def filter_overstock(df: pd.DataFrame, threshold: float = 90.0) -> pd.DataFrame:
+    """Overstock: DOC >= threshold (default 90)"""
+    if "DOC" not in df.columns:
+        return df.iloc[0:0].copy()
+    doc = pd.to_numeric(df["DOC"], errors="coerce")
+    return df[doc >= threshold].copy()
+
 def create_excel_with_doc_format(df: pd.DataFrame) -> bytes:
     """
     Create an XLSX bytes object from df and apply DOC conditional formatting
@@ -674,19 +689,11 @@ if st.button("🚀 Process Data"):
                         brands = sorted(original["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in original.columns else []
                         selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
 
-                        # -------------------------------
-                        # FILTERS FOR OOS & OVERSTOCK
-                        # -------------------------------
-                        df_export = original.copy()
-
+                        # 🔴 yahan sirf filtered df use ho raha hai
                         if over:
-                            # Overstock: DOC >= 90
-                            doc_num = pd.to_numeric(df_export["DOC"], errors="coerce")
-                            df_export = df_export[doc_num >= 90]
-                        elif oos:
-                            # OOS: afn-fulfillable-quantity == 0
-                            qty_num = pd.to_numeric(df_export["afn-fulfillable-quantity"], errors="coerce").fillna(0)
-                            df_export = df_export[qty_num == 0]
+                            df_export = filter_overstock(original)     # DOC >= 90
+                        else:
+                            df_export = filter_oos(original)           # afn-fulfillable-quantity == 0
 
                         if selected:
                             df_export = df_export[df_export["Brand"].isin(selected)].copy()
@@ -820,19 +827,11 @@ elif "processed_data" in st.session_state:
             brands = sorted(orig["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in orig.columns else []
             selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
 
-            # -------------------------------
-            # FILTERS FOR PREVIOUS OOS & OVERSTOCK
-            # -------------------------------
-            df_export = orig.copy()
-
+            # yahan bhi wahi filters apply:
             if over2:
-                # Overstock: DOC >= 90
-                doc_num_prev = pd.to_numeric(df_export["DOC"], errors="coerce")
-                df_export = df_export[doc_num_prev >= 90]
-            elif oos2:
-                # OOS: afn-fulfillable-quantity == 0
-                qty_num_prev = pd.to_numeric(df_export["afn-fulfillable-quantity"], errors="coerce").fillna(0)
-                df_export = df_export[qty_num_prev == 0]
+                df_export = filter_overstock(orig)
+            else:
+                df_export = filter_oos(orig)
 
             if selected:
                 df_export = df_export[df_export["Brand"].isin(selected)].copy()
