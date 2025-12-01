@@ -553,13 +553,23 @@ if st.button("🚀 Process Data"):
                 pm.columns = ["Amazon Sku Name", "D", "Brand Manager", "F", "Brand"]
                 pm["Amazon Sku Name"] = pm["Amazon Sku Name"].astype(str)
 
-                original = original.merge(pm[["Amazon Sku Name", "Brand Manager"]], how="left", left_on="SKU", right_on="Amazon Sku Name")
+                original = original.merge(
+                    pm[["Amazon Sku Name", "Brand Manager"]],
+                    how="left",
+                    left_on="SKU",
+                    right_on="Amazon Sku Name",
+                )
                 if "Title" in original.columns and "Brand Manager" in original.columns:
                     insert_pos = original.columns.get_loc("Title")
                     col = original.pop("Brand Manager")
                     original.insert(insert_pos, "Brand Manager", col)
 
-                original = original.merge(pm[["Amazon Sku Name", "Brand"]], how="left", left_on="SKU", right_on="Amazon Sku Name")
+                original = original.merge(
+                    pm[["Amazon Sku Name", "Brand"]],
+                    how="left",
+                    left_on="SKU",
+                    right_on="Amazon Sku Name",
+                )
                 if "Title" in original.columns and "Brand" in original.columns:
                     insert_pos = original.columns.get_loc("Title")
                     col = original.pop("Brand")
@@ -672,14 +682,18 @@ if st.button("🚀 Process Data"):
                                 break
 
                         brands = sorted(original["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in original.columns else []
-                        selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
+                        selected = st.multiselect(
+                            "Filter brands for export (leave empty = all)",
+                            options=brands,
+                            default=brands,
+                        )
 
                         # prepare export df
                         df_export = original.copy()
                         if selected:
                             df_export = df_export[df_export["Brand"].isin(selected)].copy()
 
-                        # === FILTERING LOGIC ===
+                        # === FILTERING LOGIC (CURRENT DATA) ===
                         if oos and "afn-fulfillable-quantity" in df_export.columns:
                             # OOS: quantity exactly 0
                             df_export = df_export[df_export["afn-fulfillable-quantity"] == 0].copy()
@@ -694,7 +708,9 @@ if st.button("🚀 Process Data"):
                         base_dir = os.path.dirname(__file__)
                         tmpl_xlsm = os.path.join(base_dir, "pivot_template.xlsm")
                         tmpl_xlsx = os.path.join(base_dir, "pivot_template.xlsx")
-                        template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
+                        template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (
+                            tmpl_xlsx if os.path.exists(tmpl_xlsx) else None
+                        )
 
                         final_bytes = None
                         template_used = False
@@ -706,7 +722,7 @@ if st.button("🚀 Process Data"):
                                 final_bytes = buf.getvalue()
                                 template_used = True
                                 st.success("✅ Used pivot template — Pivot/Slicer included when opened in Excel.")
-                            except Exception as te:
+                            except Exception:
                                 template_error = traceback.format_exc()
                                 st.warning("⚠️ Template found but failed to be filled programmatically. Falling back to generated workbook.")
                                 st.code(template_error)
@@ -720,7 +736,9 @@ if st.button("🚀 Process Data"):
                                 selected_brands=selected,
                             )
                             final_bytes = fallback_buf.getvalue()
-                            st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
+                            st.info(
+                                "ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot)."
+                            )
 
                         # pick correct extension & mime based on template vs fallback
                         if template_path and template_used and template_path.lower().endswith(".xlsm"):
@@ -759,7 +777,7 @@ elif "processed_data" in st.session_state:
     with c3:
         st.metric("Average DOC", f"{orig['DOC'].mean():.2f} days")
     with c4:
-        st.metric("Total Orders", f"{orig['Total Order Items"].sum():,.0f}")
+        st.metric("Total Orders", f"{orig['Total Order Items'].sum():,.0f}")
 
     st.markdown("---")
     display_cols = [
@@ -815,7 +833,11 @@ elif "processed_data" in st.session_state:
                     parent_col = c
                     break
             brands = sorted(orig["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in orig.columns else []
-            selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
+            selected = st.multiselect(
+                "Filter brands for export (leave empty = all)",
+                options=brands,
+                default=brands,
+            )
 
             df_export = orig.copy()
             if selected:
@@ -835,7 +857,9 @@ elif "processed_data" in st.session_state:
             base_dir = os.path.dirname(__file__)
             tmpl_xlsm = os.path.join(base_dir, "pivot_template.xlsm")
             tmpl_xlsx = os.path.join(base_dir, "pivot_template.xlsx")
-            template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
+            template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (
+                tmpl_xlsx if os.path.exists(tmpl_xlsx) else None
+            )
 
             final_bytes = None
             template_used = False
@@ -846,7 +870,7 @@ elif "processed_data" in st.session_state:
                     final_bytes = buf.getvalue()
                     template_used = True
                     st.success("✅ Used pivot template — Pivot/Slicer included when opened in Excel.")
-                except Exception as te:
+                except Exception:
                     st.warning("⚠️ Template found but failed to be filled programmatically. Falling back to generated workbook.")
                     st.code(traceback.format_exc())
 
@@ -859,7 +883,9 @@ elif "processed_data" in st.session_state:
                     selected_brands=selected,
                 )
                 final_bytes = fallback_buf.getvalue()
-                st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
+                st.info(
+                    "ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot)."
+                )
 
             # pick correct extension & mime based on template vs fallback
             if template_path and template_used and template_path.lower().endswith(".xlsm"):
@@ -881,4 +907,7 @@ elif "processed_data" in st.session_state:
 
 # footer
 st.markdown("---")
-st.markdown("<div style='text-align: center; color: #666; padding: 10px;'>Inventory Analysis Dashboard | Built with Streamlit</div>", unsafe_allow_html=True)
+st.markdown(
+    "<div style='text-align: center; color: #666; padding: 10px;'>Inventory Analysis Dashboard | Built with Streamlit</div>",
+    unsafe_allow_html=True,
+)
