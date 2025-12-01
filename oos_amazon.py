@@ -66,19 +66,21 @@ def color_doc(val):
 
 def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name: str = "DataTable"):
     """
-    Load template_path and ensure there's an Excel Table named `table_name`.
-    - If the table exists: replace its header + rows with df and update the table.ref.
-    - If the table does NOT exist: create a new worksheet named table_name (or table_name_1 if conflict),
-      write df there and add an Excel Table named table_name.
-    Return BytesIO of modified workbook.
+    Load an Excel template (xlsx/xlsm) and ensure there's an Excel Table named `table_name`.
+    - If the table exists: replace header+rows and update the table.ref.
+    - If the table is missing: create a new sheet named table_name or table_name_1 and add a Table.
+    Additionally apply conditional formatting (CellIs rules) to the DOC column.
+    Returns BytesIO of the modified workbook.
     """
     from openpyxl.worksheet.table import Table, TableStyleInfo
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import PatternFill, Font
 
     wb = load_workbook(template_path)
     table_sheet = None
     table_obj = None
 
-    # 1) Try to find existing table by name
+    # 1) try to find existing table named table_name
     for ws in wb.worksheets:
         for tbl in ws._tables:
             if tbl.displayName == table_name:
@@ -88,30 +90,31 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
         if table_obj:
             break
 
+    # helper: parse A1 addresses
+    def cell_to_rowcol(cell):
+        import re
+        m = re.match(r"([A-Z]+)(\d+)", cell)
+        if not m:
+            raise RuntimeError("Unexpected table ref format")
+        col_letters, row = m.groups()
+        col = 0
+        for ch in col_letters:
+            col = col * 26 + (ord(ch) - ord('A') + 1)
+        return int(row), col
+
     if table_obj is not None:
-        # existing table: replace header + rows and update ref
+        # update existing table
         ref = table_obj.ref
         start_cell, end_cell = ref.split(":")
-        def cell_to_rowcol(cell):
-            import re
-            m = re.match(r"([A-Z]+)(\d+)", cell)
-            if not m:
-                raise RuntimeError("Unexpected table ref format")
-            col_letters, row = m.groups()
-            col = 0
-            for ch in col_letters:
-                col = col * 26 + (ord(ch) - ord('A') + 1)
-            return int(row), col
-
         start_row, start_col = cell_to_rowcol(start_cell)
         end_row, end_col = cell_to_rowcol(end_cell)
 
-        # clear existing rows under the header
+        # clear old rows under header
         for r in range(start_row + 1, end_row + 1):
             for c in range(start_col, end_col + 1):
                 table_sheet.cell(row=r, column=c).value = None
 
-        # write new header & rows
+        # write new header and rows
         header = list(df.columns)
         for idx, col_name in enumerate(header):
             table_sheet.cell(row=start_row, column=start_col + idx, value=col_name)
@@ -120,36 +123,103 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
             for c_idx, v in enumerate(row, start=start_col):
                 table_sheet.cell(row=r_idx, column=c_idx, value=v)
 
-        # update table ref
+        # update ref
         new_end_row = start_row + len(df)
         new_end_col = start_col + len(header) - 1
         table_obj.ref = f"{get_column_letter(start_col)}{start_row}:{get_column_letter(new_end_col)}{new_end_row}"
-
+        target_ws = table_sheet
+        header_row_idx = start_row
+        first_data_row = start_row + 1
     else:
-        # table not found -> create a new sheet named table_name (if name exists, append suffix)
+        # create a new sheet named table_name (avoid collisions)
         sheet_name = table_name
         base_name = sheet_name
         i = 1
         while sheet_name in [ws.title for ws in wb.worksheets]:
             sheet_name = f"{base_name}_{i}"
             i += 1
-        ws = wb.create_sheet(sheet_name)
+        ws_new = wb.create_sheet(sheet_name)
 
-        # write header + data
         header = list(df.columns)
-        ws.append(header)
+        ws_new.append(header)
         for row in df.itertuples(index=False, name=None):
-            ws.append(row)
+            ws_new.append(row)
 
-        # create an Excel Table over the written range
-        max_row = ws.max_row
-        max_col = ws.max_column
+        max_row = ws_new.max_row
+        max_col = ws_new.max_column
         ref = f"A1:{get_column_letter(max_col)}{max_row}"
         table = Table(displayName=table_name, ref=ref)
         table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium9", showRowStripes=True)
-        ws.add_table(table)
+        ws_new.add_table(table)
 
-    # Save to bytes and return
+        target_ws = ws_new
+        header_row_idx = 1
+        first_data_row = 2
+
+    # --- apply conditional formatting to DOC column in target_ws ---
+    # find DOC column index by header row
+    header_cells = list(target_ws.iter_rows(min_row=header_row_idx, max_row=header_row_idx, values_only=False))[0]
+    doc_col_idx = None
+    for idx, cell in enumerate(header_cells, start=1):
+        if cell.value and str(cell.value).strip().lower() == "doc":
+            doc_col_idx = idx
+            break
+    if doc_col_idx is None:
+        for idx, cell in enumerate(header_cells, start=1):
+            if cell.value and "doc" in str(cell.value).strip().lower():
+                doc_col_idx = idx
+                break
+
+    col_map = {
+        "dark_red": "8B0000",
+        "dark_orange": "FF8C00",
+        "dark_green": "006400",
+        "golden": "B8860B",
+        "sky": "0F52BA",
+        "saddle": "8B4513",
+        "white": "FFFFFF",
+    }
+
+    if doc_col_idx is not None:
+        try:
+            last_row = target_ws.max_row
+            col_letter = get_column_letter(doc_col_idx)
+            rng = f"{col_letter}{first_data_row}:{col_letter}{last_row}"
+
+            # create rules for buckets using CellIsRule
+            rules = [
+                CellIsRule(operator='between', formula=['0','6.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_red"], end_color=col_map["dark_red"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['7','14.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_orange"], end_color=col_map["dark_orange"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['15','29.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["dark_green"], end_color=col_map["dark_green"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['30','44.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["golden"], end_color=col_map["golden"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['45','59.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["sky"], end_color=col_map["sky"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+                CellIsRule(operator='between', formula=['60','89.9999'],
+                           stopIfTrue=True,
+                           fill=PatternFill(start_color=col_map["saddle"], end_color=col_map["saddle"], fill_type="solid"),
+                           font=Font(color="FFFFFF")),
+            ]
+
+            for rrule in rules:
+                target_ws.conditional_formatting.add(rng, rrule)
+        except Exception:
+            # non-fatal; continue
+            pass
+
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -227,7 +297,7 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     except Exception:
         pass
 
-    # add an Excel Table (DataTable) to be useful for users
+    # add an Excel Table (DataTable)
     try:
         from openpyxl.worksheet.table import Table, TableStyleInfo
         max_row = ws.max_row
@@ -283,7 +353,7 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     except Exception:
         pass
 
-    # ChartData
+    # ChartData + Chart
     ws_chartdata = wb.create_sheet("ChartData")
     if not agg.empty:
         for r in dataframe_to_rows(agg[["Brand_Parent", "DOC", "DRR"]], index=False, header=True):
@@ -310,13 +380,13 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
         how.append(["How to create interactive PivotTable + Slicer in Excel (no VBA)"])
         how.append([])
         how.append(["1) In Excel: Insert → PivotTable"])
-        how.append([f"   - Select the table named 'DataTable' on the sheet: {sheet_name}"])
+        how.append([f"   - Select the table named 'DataTable' on the sheet: {sheet_name if 'sheet_name' in locals() else 'Data'}"])
         how.append(["   - Place the PivotTable on a new worksheet."])
         how.append([])
         how.append(["2) In PivotField list: drag 'Brand' and '(Parent) ASIN' (or your parent column) into Rows (Brand first)."])
         how.append(["   - Drag 'DOC' and 'DRR' into Values (set aggregation = Sum)."])
         how.append([])
-        how.append(["3) To add a Slicer: Insert → Slicer → choose 'Brand'."])
+        how.append(["3) To add a Slicer: Insert → Slicer → choose 'Brand' and '(Parent) ASIN'."])
     except Exception:
         pass
 
@@ -326,7 +396,7 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     return buf
 
 # -------------------------
-# UI: file upload + processing (keeps your original logic)
+# UI: file upload + processing
 # -------------------------
 st.title("📊 Inventory Analysis Dashboard")
 st.markdown("Upload your files and analyze inventory with Days of Coverage (DOC) calculations")
@@ -380,7 +450,7 @@ if st.button("🚀 Process Data"):
                 inventory.columns = inventory.columns.str.strip()
                 inventory.iloc[:, 0] = inventory.iloc[:, 0].astype(str)
 
-                # process pm
+                # process pm columns C:G
                 pm = pm.iloc[:, 2:7]
                 pm.columns = ["Amazon Sku Name", "D", "Brand Manager", "F", "Brand"]
                 pm["Amazon Sku Name"] = pm["Amazon Sku Name"].astype(str)
@@ -502,20 +572,25 @@ if st.button("🚀 Process Data"):
                             df_export = df_export[df_export["Brand"].isin(selected)].copy()
                         df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
-                        template_path = os.path.join(os.path.dirname(__file__), "pivot_template.xlsx")
+                        # template detection: prefer macro-enabled .xlsm if present
+                        base_dir = os.path.dirname(__file__)
+                        tmpl_xlsm = os.path.join(base_dir, "pivot_template.xlsm")
+                        tmpl_xlsx = os.path.join(base_dir, "pivot_template.xlsx")
+                        template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
+
                         final_bytes = None
                         template_used = False
                         template_error = None
 
-                        if os.path.exists(template_path):
+                        if template_path:
                             try:
                                 buf = fill_template_and_get_bytes(template_path, df_export, table_name="DataTable")
                                 final_bytes = buf.getvalue()
                                 template_used = True
-                                st.success("✅ Used pivot_template.xlsx — Pivot/Slicer included (open in Excel).")
+                                st.success("✅ Used pivot template — Pivot/Slicer included when opened in Excel.")
                             except Exception as te:
                                 template_error = traceback.format_exc()
-                                st.warning("⚠️ pivot_template.xlsx found but failed to be filled programmatically. Falling back to generated workbook.")
+                                st.warning("⚠️ Template found but failed to be filled programmatically. Falling back to generated workbook.")
                                 st.code(template_error)
 
                         if final_bytes is None:
@@ -601,15 +676,19 @@ elif "processed_data" in st.session_state:
                 df_export = df_export[df_export["Brand"].isin(selected)].copy()
             df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
-            template_path = os.path.join(os.path.dirname(__file__), "pivot_template.xlsx")
+            base_dir = os.path.dirname(__file__)
+            tmpl_xlsm = os.path.join(base_dir, "pivot_template.xlsm")
+            tmpl_xlsx = os.path.join(base_dir, "pivot_template.xlsx")
+            template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
+
             final_bytes = None
-            if os.path.exists(template_path):
+            if template_path:
                 try:
                     buf = fill_template_and_get_bytes(template_path, df_export, table_name="DataTable")
                     final_bytes = buf.getvalue()
-                    st.success("✅ Used pivot_template.xlsx — Pivot/Slicer included (open in Excel).")
+                    st.success("✅ Used pivot template — Pivot/Slicer included when opened in Excel.")
                 except Exception as te:
-                    st.warning("⚠️ pivot_template.xlsx found but failed to be filled programmatically. Falling back to generated workbook.")
+                    st.warning("⚠️ Template found but failed to be filled programmatically. Falling back to generated workbook.")
                     st.code(traceback.format_exc())
 
             if final_bytes is None:
