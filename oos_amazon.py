@@ -740,7 +740,7 @@ if st.button("🚀 Process Data"):
                 if {"SKU", "Seller SKU"}.issubset(original.columns):
 
                     original["Listing Status"] = original.apply(
-                        lambda r: "Listing Close" if str(r["SKU"]) == str(r["Seller SKU"]) and r["Seller SKU"] != "" else "Active",
+                        lambda r: "Listing Close" if str(r["SKU"]) == str(r["Seller SKU"]) and r["Seller SKU"] != "" else "",
                         axis=1
                     )
 
@@ -1034,3 +1034,4 @@ elif "processed_data" in st.session_state:
 # footer
 st.markdown("---")
 st.markdown("<div style='text-align: center; color: #666; padding: 10px;'>Inventory Analysis Dashboard | Built with Streamlit</div>", unsafe_allow_html=True)
+
