@@ -601,12 +601,12 @@ if st.button("🚀 Process Data"):
 
                 pm["Amazon Sku Name"] = pm["Amazon Sku Name"].astype(str)
 
-                # CRITICAL: ensure one row per SKU
-                pm = (
-                    pm
-                    .dropna(subset=["Amazon Sku Name"])
-                    .drop_duplicates(subset=["Amazon Sku Name"], keep="first")
-                )
+                # # CRITICAL: ensure one row per SKU
+                # pm = (
+                #     pm
+                #     .dropna(subset=["Amazon Sku Name"])
+                #     .drop_duplicates(subset=["Amazon Sku Name"], keep="first")
+                # )
 
                 # SINGLE merge instead of two
                 original = original.merge(
@@ -680,13 +680,6 @@ if st.button("🚀 Process Data"):
                 pm_lookup["ASIN"] = pm_lookup["ASIN"].astype(str)
                 pm_lookup["CP"] = pd.to_numeric(pm_lookup["CP"], errors="coerce").fillna(0)
 
-                # 🔴 IMPORTANT: keep ONLY ONE row per ASIN
-                pm_lookup = (
-                    pm_lookup
-                    .sort_values("CP", ascending=False)   # optional: keep highest CP
-                    .drop_duplicates(subset=["ASIN"], keep="first")
-                )
-
                 if "(Parent) ASIN" in original.columns:
                     original["(Parent) ASIN"] = original["(Parent) ASIN"].astype(str)
 
@@ -712,6 +705,16 @@ if st.button("🚀 Process Data"):
                     original["Vendor SKU"] = ""
                     original["CP"] = 0
                     original["Total CP"] = 0
+                    
+                # ✅ SAFE DEDUPLICATION:
+                # same Parent ASIN + same SKU → remove
+                # same Parent ASIN + different SKU → keep
+                if {"(Parent) ASIN", "SKU"}.issubset(original.columns):
+                    original = original.drop_duplicates(
+                        subset=["(Parent) ASIN", "SKU"],
+                        keep="first"
+                    )
+
 
                 # -------------------------
                 # Seller SKU mapping (EXACT Excel VLOOKUP equivalent)
