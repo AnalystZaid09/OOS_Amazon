@@ -362,13 +362,19 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     working = working.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
     if parent_col and parent_col in working.columns:
-        agg = working.groupby(["Brand", parent_col], dropna=False)[["DOC", "DRR"]].sum().reset_index()
+        agg = working.groupby(
+            ["Brand", parent_col], dropna=False
+        )[["DOC", "DRR", "Total CP"]].sum().reset_index()
         agg["Brand_Parent"] = agg["Brand"].astype(str) + " | " + agg[parent_col].astype(str)
+
     elif "Brand" in working.columns:
-        agg = working.groupby(["Brand"], dropna=False)[["DOC", "DRR"]].sum().reset_index()
+        agg = working.groupby(
+            ["Brand"], dropna=False
+        )[["DOC", "DRR", "Total CP"]].sum().reset_index()
         agg["Brand_Parent"] = agg["Brand"].astype(str)
+
     else:
-        agg = pd.DataFrame(columns=["Brand_Parent", "DOC", "DRR"])
+        agg = pd.DataFrame(columns=["Brand_Parent", "DOC", "DRR", "Total CP"])
 
     wb = Workbook()
     ws = wb.active
@@ -469,7 +475,7 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     # ChartData + Chart
     ws_chartdata = wb.create_sheet("ChartData")
     if not agg.empty:
-        for r in dataframe_to_rows(agg[["Brand_Parent", "DOC", "DRR"]], index=False, header=True):
+        for r in dataframe_to_rows(agg[["Brand_Parent", "DOC", "DRR","Total CP"]], index=False, header=True):
             ws_chartdata.append(r)
         try:
             from openpyxl.chart import BarChart, Reference
@@ -498,6 +504,7 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
         how.append([])
         how.append(["2) In PivotField list: drag 'Brand' and '(Parent) ASIN' (or your parent column) into Rows (Brand first)."])
         how.append(["   - Drag 'DOC' and 'DRR' into Values (set aggregation = Sum)."])
+        how.append(["   - Drag 'Total CP' into Values (Aggregation = Sum)."])
         how.append([])
         how.append(["3) To add a Slicer: Insert → Slicer → choose 'Brand' and '(Parent) ASIN'."])
     except Exception:
@@ -531,19 +538,31 @@ with st.sidebar:
     )
 
 st.header("📁 Upload Files")
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     business_file = st.file_uploader("Upload Business Report CSV", type=["csv"], key="business")
 with col2:
     pm_file = st.file_uploader("Upload PM Excel/CSV", type=["xlsx", "csv"], key="pm")
 with col3:
     inventory_file = st.file_uploader("Upload Manage Inventory CSV", type=["csv"], key="inventory")
+with col4:
+    inventory_listing_file = st.file_uploader(
+        "Upload Inventory Listing CSV",
+        type=["csv", "xlsx"],
+        key="inventory_listing"
+    )
+
 
 st.markdown("---")
 
 if st.button("🚀 Process Data"):
-    if business_file is None or pm_file is None or inventory_file is None:
-        st.error("⚠️ Please upload all three files before processing!")
+    if (
+    business_file is None
+    or pm_file is None
+    or inventory_file is None
+    or inventory_listing_file is None):
+        st.error("⚠️ Please upload all four files before processing!")
+
     elif no_of_days <= 0:
         st.error("⚠️ Number of days must be greater than 0!")
     else:
@@ -555,30 +574,56 @@ if st.button("🚀 Process Data"):
                     original["SKU"] = original["SKU"].astype(str)
 
                 if pm_file.name.endswith(".xlsx"):
-                    pm = pd.read_excel(pm_file)
+                    pm_read= pd.read_excel(pm_file)
                 else:
                     pm = pd.read_csv(pm_file)
 
                 inventory = pd.read_csv(inventory_file)
                 inventory.columns = inventory.columns.str.strip()
                 inventory.iloc[:, 0] = inventory.iloc[:, 0].astype(str)
+                
+                # -------------------------
+                # Inventory Listing file
+                # -------------------------
+                if inventory_listing_file.name.endswith(".xlsx"):
+                    inventory_listing = pd.read_excel(inventory_listing_file)
+                else:
+                    inventory_listing = pd.read_csv(inventory_listing_file)
+
+                inventory_listing.columns = inventory_listing.columns.str.strip()
 
                 # process pm columns C:G
-                pm = pm.iloc[:, 2:7]
+                # -------------------------
+                # PM cleanup + merge (SAFE – no duplicates)
+                # -------------------------
+                pm = pm_read.iloc[:, 2:7].copy()
                 pm.columns = ["Amazon Sku Name", "D", "Brand Manager", "F", "Brand"]
+
                 pm["Amazon Sku Name"] = pm["Amazon Sku Name"].astype(str)
 
-                original = original.merge(pm[["Amazon Sku Name", "Brand Manager"]], how="left", left_on="SKU", right_on="Amazon Sku Name")
-                if "Title" in original.columns and "Brand Manager" in original.columns:
-                    insert_pos = original.columns.get_loc("Title")
-                    col = original.pop("Brand Manager")
-                    original.insert(insert_pos, "Brand Manager", col)
+                # CRITICAL: ensure one row per SKU
+                pm = (
+                    pm
+                    .dropna(subset=["Amazon Sku Name"])
+                    .drop_duplicates(subset=["Amazon Sku Name"], keep="first")
+                )
 
-                original = original.merge(pm[["Amazon Sku Name", "Brand"]], how="left", left_on="SKU", right_on="Amazon Sku Name")
-                if "Title" in original.columns and "Brand" in original.columns:
-                    insert_pos = original.columns.get_loc("Title")
-                    col = original.pop("Brand")
-                    original.insert(insert_pos, "Brand", col)
+                # SINGLE merge instead of two
+                original = original.merge(
+                    pm[["Amazon Sku Name", "Brand Manager", "Brand"]],
+                    how="left",
+                    left_on="SKU",
+                    right_on="Amazon Sku Name"
+                )
+
+                # reposition columns (optional – your existing logic)
+                if "Title" in original.columns:
+                    for col_name in ["Brand Manager", "Brand"]:
+                        if col_name in original.columns:
+                            col = original.pop(col_name)
+                            insert_pos = original.columns.get_loc("Title")
+                            original.insert(insert_pos, col_name, col)
+
 
                 # inventory mapping
                 if inventory.shape[1] > 10:
@@ -613,6 +658,93 @@ if st.button("🚀 Process Data"):
                 original["DOC"] = (original["afn-fulfillable-quantity"] / original["DRR"]).round(2)
                 original["DOC"] = original["DOC"].replace([float("inf"), float("-inf")], 0)
 
+                # -------------------------
+                # REAL Vendor SKU, CP, Total CP (NO EXCEL FORMULA)
+                # -------------------------
+                # -------------------------
+                # PM lookup (ASIN based)
+                # -------------------------
+                required_cols = ["ASIN", "Vendor SKU Codes", "CP"]
+                missing = [c for c in required_cols if c not in pm_read.columns]
+                if missing:
+                    raise ValueError(f"PM file missing columns: {missing}")
+
+                # -------------------------
+                # PM lookup (DEDUPED by ASIN)
+                # -------------------------
+                pm_lookup = (
+                    pm_read[required_cols]
+                    .copy()
+                )
+
+                pm_lookup["ASIN"] = pm_lookup["ASIN"].astype(str)
+                pm_lookup["CP"] = pd.to_numeric(pm_lookup["CP"], errors="coerce").fillna(0)
+
+                # 🔴 IMPORTANT: keep ONLY ONE row per ASIN
+                pm_lookup = (
+                    pm_lookup
+                    .sort_values("CP", ascending=False)   # optional: keep highest CP
+                    .drop_duplicates(subset=["ASIN"], keep="first")
+                )
+
+                if "(Parent) ASIN" in original.columns:
+                    original["(Parent) ASIN"] = original["(Parent) ASIN"].astype(str)
+
+                    original = original.merge(
+                        pm_lookup,
+                        how="left",
+                        left_on="(Parent) ASIN",
+                        right_on="ASIN"
+                    )
+
+                    original.rename(
+                        columns={"Vendor SKU Codes": "Vendor SKU"},
+                        inplace=True
+                    )
+
+                    original["Total CP"] = (
+                        original["afn-fulfillable-quantity"].fillna(0) * original["CP"]
+                    ).round(2)
+
+                    original.drop(columns=["ASIN"], inplace=True, errors="ignore")
+
+                else:
+                    original["Vendor SKU"] = ""
+                    original["CP"] = 0
+                    original["Total CP"] = 0
+
+                # -------------------------
+                # Seller SKU mapping (EXACT Excel VLOOKUP equivalent)
+                # -------------------------
+                if "SKU" in original.columns and "seller-sku" in inventory_listing.columns:
+
+                    original["SKU"] = original["SKU"].astype(str)
+                    inventory_listing["seller-sku"] = inventory_listing["seller-sku"].astype(str)
+
+                    seller_sku_set = set(inventory_listing["seller-sku"].dropna())
+
+                    original["Seller SKU"] = original["SKU"].apply(
+                        lambda x: x if x in seller_sku_set else ""
+                    )
+
+                else:
+                    original["Seller SKU"] = ""
+                    st.warning("⚠️ seller-sku column not found in Inventory Listing file")
+                
+                # -------------------------
+                # Listing Status
+                # -------------------------
+                if {"SKU", "Seller SKU"}.issubset(original.columns):
+
+                    original["Listing Status"] = original.apply(
+                        lambda r: "Listing Close" if str(r["SKU"]) == str(r["Seller SKU"]) and r["Seller SKU"] != "" else "Active",
+                        axis=1
+                    )
+
+                else:
+                    original["Listing Status"] = ""
+
+
                 st.success("✅ Data processed successfully!")
 
                 # display metrics
@@ -640,12 +772,18 @@ if st.button("🚀 Process Data"):
                     "afn-reserved-quantity",
                     "DRR",
                     "DOC",
+                    "Vendor SKU",
+                    "CP",
+                    "Total CP",
+                    "Seller SKU",
+                    "Listing Status"
                 ]
                 display_cols = [col for col in display_cols if col in original.columns]
                 display_df = original[display_cols].copy()
                 styled_df = display_df.style.map(color_doc, subset=["DOC"])
 
-                st.dataframe(styled_df, width="stretch", height=600)
+                st.dataframe(styled_df, use_container_width=True, height=600)
+
 
                 st.markdown("---")
 
@@ -783,11 +921,16 @@ elif "processed_data" in st.session_state:
         "afn-reserved-quantity",
         "DRR",
         "DOC",
+        "Vendor SKU",
+        "CP",
+        "Total CP",
+        "Seller SKU",
+        "Listing Status"
     ]
     display_cols = [col for col in display_cols if col in orig.columns]
     display_df = orig[display_cols].copy()
     styled_df = display_df.style.map(color_doc, subset=["DOC"])
-    st.dataframe(styled_df, width="stretch", height=600)
+    st.dataframe(styled_df, use_container_width=True, height=600)
 
     st.markdown("---")
     cA, cB = st.columns(2)
