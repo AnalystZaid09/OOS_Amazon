@@ -547,7 +547,7 @@ with col3:
     inventory_file = st.file_uploader("Upload Manage Inventory CSV", type=["csv"], key="inventory")
 with col4:
     inventory_listing_file = st.file_uploader(
-        "Upload Inventory Listing CSV",
+        "Upload Inactive Listing Report",
         type=["csv", "xlsx"],
         key="inventory_listing"
     )
@@ -1034,5 +1034,6 @@ elif "processed_data" in st.session_state:
 # footer
 st.markdown("---")
 st.markdown("<div style='text-align: center; color: #666; padding: 10px;'>Inventory Analysis Dashboard | Built with Streamlit</div>", unsafe_allow_html=True)
+
 
 
