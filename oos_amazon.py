@@ -528,11 +528,11 @@ with st.sidebar:
         min_value=1,
         value=31,
         step=1,
-        help="This represents the time period for your sales data. DRR = Total Order Items ÷ Days.",
+        help="This represents the time period for your sales data. DRR = Total Orders÷ Days.",
     )
     st.info(
         """
-- DRR (Daily Run Rate) = Total Order Items ÷ Days
+- DRR (Daily Run Rate) = Total Orders ÷ Days
 - DOC (Days of Coverage) = afn-fulfillable-quantity ÷ DRR
 """
     )
@@ -641,19 +641,29 @@ if st.button("🚀 Process Data"):
                     original["afn-reserved-quantity"] = 0
 
                 # clean & compute DRR/DOC
-                if "Total Order Items" in original.columns:
-                    original["Total Order Items"] = (
-                        original["Total Order Items"]
-                        .astype(str)
-                        .str.replace("\u00A0", "", regex=False)
-                        .str.replace(",", "", regex=False)
-                        .str.replace(r"[^\d\.\-]", "", regex=True)
-                    )
-                    original["Total Order Items"] = pd.to_numeric(original["Total Order Items"], errors="coerce")
-                else:
-                    original["Total Order Items"] = 0
+                # -------------------------
+                # Clean & compute Total Orders
+                # -------------------------
+                for col in ["Total Order Items", "Total Order Items - B2B"]:
+                    if col in original.columns:
+                        original[col] = (
+                            original[col]
+                            .astype(str)
+                            .str.replace("\u00A0", "", regex=False)
+                            .str.replace(",", "", regex=False)
+                            .str.replace(r"[^\d\.\-]", "", regex=True)
+                        )
+                        original[col] = pd.to_numeric(original[col], errors="coerce").fillna(0)
+                    else:
+                        original[col] = 0
 
-                original["DRR"] = (original["Total Order Items"] / no_of_days).round(2)
+                # ✅ NEW COLUMN
+                original["Total Orders"] = (
+                    original["Total Order Items"] + original["Total Order Items - B2B"]
+                )
+
+
+                original["DRR"] = (original["Total Orders"] / no_of_days).round(2)
                 original["afn-fulfillable-quantity"] = pd.to_numeric(original["afn-fulfillable-quantity"], errors="coerce")
                 original["DOC"] = (original["afn-fulfillable-quantity"] / original["DRR"]).round(2)
                 original["DOC"] = original["DOC"].replace([float("inf"), float("-inf")], 0)
@@ -760,7 +770,7 @@ if st.button("🚀 Process Data"):
                 with c3:
                     st.metric("Average DOC", f"{original['DOC'].mean():.2f} days")
                 with c4:
-                    st.metric("Total Orders", f"{original['Total Order Items'].sum():,.0f}")
+                    st.metric("Total Orders", f"{original['Total Orders'].sum():,.0f}")
 
                 st.markdown("---")
 
@@ -771,6 +781,9 @@ if st.button("🚀 Process Data"):
                     "SKU",
                     "Title",
                     "Units Ordered",
+                    "Total Order Items",
+                    "Total Order Items - B2B",
+                    "Total Orders",
                     "afn-fulfillable-quantity",
                     "afn-reserved-quantity",
                     "DRR",
@@ -910,7 +923,7 @@ elif "processed_data" in st.session_state:
     with c3:
         st.metric("Average DOC", f"{orig['DOC'].mean():.2f} days")
     with c4:
-        st.metric("Total Orders", f"{orig['Total Order Items'].sum():,.0f}")
+        st.metric("Total Orders", f"{orig['Total Orders'].sum():,.0f}")
 
     st.markdown("---")
     display_cols = [
@@ -920,6 +933,9 @@ elif "processed_data" in st.session_state:
         "SKU",
         "Title",
         "Units Ordered",
+        "Total Order Items",
+        "Total Order Items - B2B",
+        "Total Orders",
         "afn-fulfillable-quantity",
         "afn-reserved-quantity",
         "DRR",
@@ -1034,6 +1050,3 @@ elif "processed_data" in st.session_state:
 # footer
 st.markdown("---")
 st.markdown("<div style='text-align: center; color: #666; padding: 10px;'>Inventory Analysis Dashboard | Built with Streamlit</div>", unsafe_allow_html=True)
-
-
-
