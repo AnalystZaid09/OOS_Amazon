@@ -332,7 +332,6 @@ def fill_template_and_get_bytes(template_path: str, df: pd.DataFrame, table_name
                 target_ws.conditional_formatting.add(rng, rrule)
         except Exception:
             pass
-
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
@@ -516,6 +515,45 @@ def create_fallback_workbook(df: pd.DataFrame, sort_desc: bool, sheet_name: str,
     return buf
 
 # -------------------------
+# Inventory Report Builder
+# -------------------------
+def build_inventory_report(inventory_df: pd.DataFrame, pm_df: pd.DataFrame) -> pd.DataFrame:
+    inv = inventory_df.copy()
+    inv.columns = inv.columns.str.strip()
+    pm_df.columns = pm_df.columns.str.strip()
+
+    asin_col = [c for c in inv.columns if c.lower() == "asin"][0]
+    inv[asin_col] = inv[asin_col].astype(str)
+
+    pm_lookup = (
+        pm_df[["ASIN", "Brand", "Brand Manager", "Vendor SKU Codes", "CP"]]
+        .drop_duplicates(subset=["ASIN"])
+        .copy()
+    )
+
+    pm_lookup["ASIN"] = pm_lookup["ASIN"].astype(str)
+    pm_lookup["CP"] = pd.to_numeric(pm_lookup["CP"], errors="coerce").fillna(0)
+
+    inv = inv.merge(
+        pm_lookup,
+        how="left",
+        left_on=asin_col,
+        right_on="ASIN"
+    )
+
+    inv.rename(columns={"Vendor SKU Codes": "Vendor SKU"}, inplace=True)
+
+    wh_col = next((c for c in inv.columns if "afn-warehouse" in c.lower()), None)
+
+    if wh_col:
+        inv[wh_col] = pd.to_numeric(inv[wh_col], errors="coerce").fillna(0)
+        inv["As per Qty"] = (inv[wh_col] * inv["CP"]).round(2)
+    else:
+        inv["As per Qty"] = 0
+
+    return inv
+
+# -------------------------
 # UI: file upload + processing
 # -------------------------
 st.title("📊 Inventory Analysis Dashboard")
@@ -570,18 +608,40 @@ if st.button("🚀 Process Data"):
             try:
                 original = pd.read_csv(business_file)
 
-                if "SKU" in original.columns:
-                    original["SKU"] = original["SKU"].astype(str)
+                # ---------- SAFE SKU COLUMN DETECTION ----------
+                sku_col = next(
+                    (c for c in original.columns if c.strip().lower() == "sku"),
+                    None
+                )
+
+                if not sku_col:
+                    st.error("❌ Business Report file is invalid. Required column missing: SKU")
+                    st.stop()
+
+                # Normalize column name to 'SKU'
+                if sku_col != "SKU":
+                    original.rename(columns={sku_col: "SKU"}, inplace=True)
+
 
                 if pm_file.name.endswith(".xlsx"):
                     pm_read= pd.read_excel(pm_file)
                 else:
-                    pm = pd.read_csv(pm_file)
+                    pm_read = pd.read_csv(pm_file)
 
                 inventory = pd.read_csv(inventory_file)
                 inventory.columns = inventory.columns.str.strip()
                 inventory.iloc[:, 0] = inventory.iloc[:, 0].astype(str)
                 
+                # -------------------------
+                # Inventory Report creation
+                # -------------------------
+                inventory_report_df = build_inventory_report(
+                    inventory_df=inventory,
+                    pm_df=pm_read
+                )
+
+                st.session_state["inventory_report"] = inventory_report_df
+
                 # -------------------------
                 # Inventory Listing file
                 # -------------------------
@@ -626,19 +686,34 @@ if st.button("🚀 Process Data"):
 
 
                 # inventory mapping
-                if inventory.shape[1] > 10:
-                    return_col = inventory.columns[10]
-                    mi_map = inventory.set_index(inventory.columns[0])[return_col]
-                    original["afn-fulfillable-quantity"] = original["SKU"].map(mi_map)
+                # ---------- SAFE afn-fulfillable-quantity detection ----------
+                fulfillable_col = next(
+                    (c for c in inventory.columns if "afn-fulfillable" in c.lower()),
+                    None
+                )
+
+                if fulfillable_col:
+                    mi_map = inventory.set_index(inventory.columns[0])[fulfillable_col]
+                    original["afn-fulfillable-quantity"] = (
+                        original["SKU"].map(mi_map).fillna(0)
+                    )
                 else:
                     original["afn-fulfillable-quantity"] = 0
 
-                if inventory.shape[1] > 12:
-                    return_col_13 = inventory.columns[12]
-                    mi_res_map = inventory.set_index(inventory.columns[0])[return_col_13]
-                    original["afn-reserved-quantity"] = original["SKU"].map(mi_res_map)
+
+                reserved_col = next(
+                    (c for c in inventory.columns if "afn-reserved" in c.lower()),
+                    None
+                )
+
+                if reserved_col:
+                    mi_res_map = inventory.set_index(inventory.columns[0])[reserved_col]
+                    original["afn-reserved-quantity"] = (
+                        original["SKU"].map(mi_res_map).fillna(0)
+                    )
                 else:
                     original["afn-reserved-quantity"] = 0
+
 
                 # clean & compute DRR/DOC
                 # -------------------------
@@ -665,8 +740,13 @@ if st.button("🚀 Process Data"):
 
                 original["DRR"] = (original["Total Orders"] / no_of_days).round(2)
                 original["afn-fulfillable-quantity"] = pd.to_numeric(original["afn-fulfillable-quantity"], errors="coerce")
-                original["DOC"] = (original["afn-fulfillable-quantity"] / original["DRR"]).round(2)
-                original["DOC"] = original["DOC"].replace([float("inf"), float("-inf")], 0)
+                original["DOC"] = (
+                    original["afn-fulfillable-quantity"] /
+                    original["DRR"].replace(0, pd.NA)
+                ).round(2)
+
+                original["DOC"] = original["DOC"].fillna(0)
+
 
                 # -------------------------
                 # REAL Vendor SKU, CP, Total CP (NO EXCEL FORMULA)
@@ -759,153 +839,312 @@ if st.button("🚀 Process Data"):
 
 
                 st.success("✅ Data processed successfully!")
+                tab_business, tab_inventory = st.tabs(["🧾 Business Report", "📦 Inventory Report"])
+                
+                # -------------------------
+                # SKU vs Total Orders Pivot
+                # -------------------------
+                pivot_df = (
+                    original
+                    .groupby("SKU", dropna=False)["Total Orders"]
+                    .sum()
+                    .reset_index()
+                    .sort_values("Total Orders", ascending=False)
+                )
+                
+                # -------------------------
+                # Business Sales Qty in Inventory Report (VLOOKUP via map)
+                # -------------------------
 
+                # Ensure SKU column exists in inventory report
+                inv_sku_col = None
+                for c in inventory_report_df.columns:
+                    if c.lower() in ["sku"]:
+                        inv_sku_col = c
+                        break
+
+                # Build lookup dictionary from pivot_df
+                sales_lookup = (
+                    pivot_df
+                    .drop_duplicates(subset=["SKU"])
+                    .set_index("SKU")["Total Orders"]
+                    .to_dict()
+                )
+
+                # Apply VLOOKUP-style mapping
+                if inv_sku_col:
+                    inventory_report_df[inv_sku_col] = inventory_report_df[inv_sku_col].astype(str)
+
+                    inventory_report_df["Business Sales Qty"] = (
+                        inventory_report_df[inv_sku_col]
+                        .map(sales_lookup)
+                        .fillna(0)
+                        .astype(int)
+                    )
+                else:
+                    inventory_report_df["Business Sales Qty"] = 0
+                    
+                inventory_report_df["DRR"] = (
+                    inventory_report_df["Business Sales Qty"] / no_of_days
+                ).round(2)
+
+                warehouse_col = next(
+                    (c for c in inventory_report_df.columns if "afn-warehouse" in c.lower()),
+                    None
+                )
+                if warehouse_col:
+                    inventory_report_df["DOC"] = (
+                        inventory_report_df[warehouse_col] /
+                        inventory_report_df["DRR"].replace(0, pd.NA)
+                    ).fillna(0)
+                else:
+                    inventory_report_df["DOC"] = 0
+
+
+                st.session_state["sku_pivot"] = pivot_df
+                
                 # display metrics
                 st.header("📈 Processed Results")
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    st.metric("Total Products", len(original))
-                with c2:
-                    st.metric("Critical Stock (< 7 days)", int((original["DOC"] < 7).sum()))
-                with c3:
-                    st.metric("Average DOC", f"{original['DOC'].mean():.2f} days")
-                with c4:
-                    st.metric("Total Orders", f"{original['Total Orders'].sum():,.0f}")
+                with tab_business:
+                    st.header("📈 Business Report")
+                    c1, c2, c3, c4 = st.columns(4)
+                    with c1:
+                        st.metric("Total Products", len(original))
+                    with c2:
+                        st.metric("Critical Stock (< 7 days)", int((original["DOC"] < 7).sum()))
+                    with c3:
+                        st.metric("Average DOC", f"{original['DOC'].mean():.2f} days")
+                    with c4:
+                        st.metric("Total Orders", f"{original['Total Orders'].sum():,.0f}")
 
-                st.markdown("---")
+                    st.markdown("---")
 
-                display_cols = [
-                    "(Child) ASIN",
-                    "Brand",
-                    "Brand Manager",
-                    "SKU",
-                    "Title",
-                    "Units Ordered",
-                    "Total Order Items",
-                    "Total Order Items - B2B",
-                    "Total Orders",
-                    "afn-fulfillable-quantity",
-                    "afn-reserved-quantity",
-                    "DRR",
-                    "DOC",
-                    "Vendor SKU",
-                    "CP",
-                    "Total CP",
-                    "Seller SKU",
-                    "Listing Status"
-                ]
-                display_cols = [col for col in display_cols if col in original.columns]
-                display_df = original[display_cols].copy()
-                styled_df = display_df.style.map(color_doc, subset=["DOC"])
+                    display_cols = [
+                        "(Child) ASIN",
+                        "Brand",
+                        "Brand Manager",
+                        "SKU",
+                        "Title",
+                        "Units Ordered",
+                        "Total Order Items",
+                        "Total Order Items - B2B",
+                        "Total Orders",
+                        "afn-fulfillable-quantity",
+                        "afn-reserved-quantity",
+                        "DRR",
+                        "DOC",
+                        "Vendor SKU",
+                        "CP",
+                        "Total CP",
+                        "Seller SKU",
+                        "Listing Status"
+                    ]
+                    display_cols = [col for col in display_cols if col in original.columns]
+                    display_df = original[display_cols].copy()
+                    styled_df = display_df.style.map(color_doc, subset=["DOC"])
 
-                st.dataframe(styled_df, use_container_width=True, height=600)
+                    st.dataframe(styled_df, use_container_width=True, height=600)
 
 
-                st.markdown("---")
+                    st.markdown("---")
 
-                # Excel export UI (template-first)
-                colA, colB = st.columns(2)
-                with colA:
-                    # plain CSV download
-                    csv_buf = io.StringIO()
-                    original.to_csv(csv_buf, index=False)
-                    st.download_button(
-                        "📥 Download CSV",
-                        data=csv_buf.getvalue(),
-                        file_name=f"processed_inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv",
-                    )
+                    # Excel export UI (template-first)
+                    colA, colB = st.columns(2)
+                    with colA:
+                        # plain CSV download
+                        csv_buf = io.StringIO()
+                        original.to_csv(csv_buf, index=False)
+                        st.download_button(
+                            "📥 Download CSV",
+                            data=csv_buf.getvalue(),
+                            file_name=f"processed_inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv",
+                        )
 
-                    # XLSX download that looks like CSV but with DOC conditional formatting
-                    xlsx_bytes = create_excel_with_doc_format(original)
-                    st.download_button(
-                        "📥 Download CSV as Excel (DOC formatted)",
-                        data=xlsx_bytes,
-                        file_name=f"processed_inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}_DOCformatted.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
+                        # XLSX download that looks like CSV but with DOC conditional formatting
+                        xlsx_bytes = create_excel_with_doc_format(original)
+                        st.download_button(
+                            "📥 Download CSV as Excel (DOC formatted)",
+                            data=xlsx_bytes,
+                            file_name=f"processed_inventory_{datetime.now().strftime('%Y%m%d_%H%M%S')}_DOCformatted.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
 
-                with colB:
-                    st.markdown("### Excel export (Template-first pivot)")
-                    over = st.button("📥 Overstock (DOC ↓) - Export Excel", key="over_export")
-                    oos = st.button("📥 OOS (DOC ↑) - Export Excel", key="oos_export")
-
-                    if over or oos:
-                        sort_desc = True if over else False
-                        # detect parent col
-                        parent_col = None
-                        for c in original.columns:
-                            cle = c.lower().replace(" ", "").replace("_", "").replace("(", "").replace(")", "")
-                            if "parent" in cle:
-                                parent_col = c
-                                break
-
+                    with colB:
+                        st.markdown("### 📥 Excel Export Center")
+                        
+                        # 1. Selection settings (Always visible)
                         brands = sorted(original["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in original.columns else []
-                        selected = st.multiselect("Filter brands for export (leave empty = all)", options=brands, default=brands)
+                        selected_export = st.multiselect("Filter brands for export", options=brands, default=brands, key="exp_brands")
+                        
+                        # 2. Logic Choice (Using a selectbox ensures the download button stays visible)
+                        export_choice = st.selectbox("Choose Export Type", ["-- Select --", "Overstock (DOC >= 90)", "OOS (Qty = 0)"])
 
-                        # 🔴 yahan sirf filtered df use ho raha hai
-                        if over:
-                            df_export = filter_overstock(original)     # DOC >= 90
-                        else:
-                            df_export = filter_oos(original)           # afn-fulfillable-quantity == 0
+                        if export_choice != "-- Select --":
+                            sort_desc = True if "Overstock" in export_choice else False
+                            
+                            # Filter the dataframe based on choice
+                            if sort_desc:
+                                df_export = filter_overstock(original)
+                            else:
+                                df_export = filter_oos(original)
+                            
+                            # Apply brand filters
+                            if selected_export:
+                                df_export = df_export[df_export["Brand"].isin(selected_export)].copy()
+                            
+                            df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
-                        if selected:
-                            df_export = df_export[df_export["Brand"].isin(selected)].copy()
+                            # Template Detection logic
+                            base_dir = os.path.dirname(__file__)
+                            tmpl_xlsm = os.path.join(base_dir, "pivot_template.xlsm")
+                            tmpl_xlsx = os.path.join(base_dir, "pivot_template.xlsx")
+                            template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
 
-                        df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
-
-                        # template detection: prefer macro-enabled .xlsm if present
-                        base_dir = os.path.dirname(__file__)
-                        tmpl_xlsm = os.path.join(base_dir, "pivot_template.xlsm")
-                        tmpl_xlsx = os.path.join(base_dir, "pivot_template.xlsx")
-                        template_path = tmpl_xlsm if os.path.exists(tmpl_xlsm) else (tmpl_xlsx if os.path.exists(tmpl_xlsx) else None)
-
-                        final_bytes = None
-                        template_used = False
-                        template_error = None
-
-                        if template_path:
-                            try:
-                                buf = fill_template_and_get_bytes(template_path, df_export, table_name="DataTable")
-                                final_bytes = buf.getvalue()
-                                template_used = True
-                                st.success("✅ Used pivot template — Pivot/Slicer included when opened in Excel.")
-                            except Exception as te:
-                                template_error = traceback.format_exc()
-                                st.warning("⚠️ Template found but failed to be filled programmatically. Falling back to generated workbook.")
-                                st.code(template_error)
-
-                        if final_bytes is None:
-                            fallback_buf = create_fallback_workbook(
-                                df_export,
-                                sort_desc=sort_desc,
-                                sheet_name="Overstock" if sort_desc else "OOS",
-                                parent_col=parent_col,
-                                selected_brands=selected,
-                            )
-                            final_bytes = fallback_buf.getvalue()
-                            st.info("ℹ️ Delivered fallback workbook (DataTable + PivotSummary + ChartData + HowToPivot).")
-
-                        # pick correct extension & mime based on template vs fallback
-                        if template_path and template_used and template_path.lower().endswith(".xlsm"):
-                            dl_ext = ".xlsm"
-                            dl_mime = "application/vnd.ms-excel.sheet.macroEnabled.12"
-                        else:
+                            # Generate Workbook Bytes
+                            final_bytes = None
                             dl_ext = ".xlsx"
                             dl_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-                        file_basename = f"{'overstock' if sort_desc else 'oos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                        file_name = file_basename + dl_ext
+                            if template_path:
+                                try:
+                                    buf = fill_template_and_get_bytes(template_path, df_export, table_name="DataTable")
+                                    final_bytes = buf.getvalue()
+                                    if template_path.endswith(".xlsm"):
+                                        dl_ext = ".xlsm"
+                                        dl_mime = "application/vnd.ms-excel.sheet.macroEnabled.12"
+                                    st.success("✅ Pivot template applied.")
+                                except Exception:
+                                    st.warning("⚠️ Template failed. Falling back to generated workbook.")
 
+                            if final_bytes is None:
+                                # Detect parent col for fallback
+                                parent_col_export = None
+                                for c in original.columns:
+                                    cle = c.lower().replace(" ", "").replace("_", "").replace("(", "").replace(")", "")
+                                    if "parent" in cle:
+                                        parent_col_export = c
+                                        break
+                                
+                                fallback_buf = create_fallback_workbook(df_export, sort_desc, "Export", parent_col=parent_col_export)
+                                final_bytes = fallback_buf.getvalue()
+
+                            # 3. Persistent Download Button
+                            st.download_button(
+                                label=f"📥 Download {export_choice} Workbook",
+                                data=final_bytes,
+                                file_name=f"{'overstock' if sort_desc else 'oos'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{dl_ext}",
+                                mime=dl_mime,
+                                key="main_export_btn"
+                            )
+
+                        # --- Consolidated Pivot Display ---
+                        st.markdown("---")
+                        st.subheader("📊 SKU vs Total Orders (Pivot)")
+                        st.dataframe(pivot_df, use_container_width=True, height=400)
+                        
+                        # Pivot Download button
+                        pivot_xl_bytes = create_excel_with_doc_format(pivot_df)
                         st.download_button(
-                            label="Download Excel workbook",
-                            data=final_bytes,
-                            file_name=file_name,
-                            mime=dl_mime,
+                            "📥 Download SKU Sales Pivot",
+                            data=pivot_xl_bytes,
+                            file_name=f"sku_sales_pivot_{datetime.now().strftime('%m%d_%H%M')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="pivot_download_btn"
                         )
 
-                # persist processed data
-                st.session_state["processed_data"] = original
+                    # persist processed data
+                    st.session_state["processed_data"] = original
+                
+                with tab_inventory:
+                    st.header("📦 Inventory Report")
+
+                    inv = inventory_report_df
+
+                    st.metric("Total ASINs", len(inv))
+                    st.metric("Total Inventory Value", f"{inv['As per Qty'].sum():,.2f}")
+
+                    st.markdown("---")
+                    st.dataframe(inv, use_container_width=True, height=600)
+
+                    st.markdown("---")
+
+                    colI1, colI2 = st.columns(2)
+
+                    # CSV
+                    with colI1:
+                        csv_buf = io.StringIO()
+                        inv.to_csv(csv_buf, index=False)
+                        st.download_button(
+                            "📥 Download Inventory CSV",
+                            data=csv_buf.getvalue(),
+                            file_name=f"inventory_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+
+                    # Excel
+                    with colI2:
+                        xlsx_bytes = create_excel_with_doc_format(inv)
+                        st.download_button(
+                            "📥 Download Inventory Excel",
+                            data=xlsx_bytes,
+                            file_name=f"inventory_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                        
+                    st.markdown("---")
+                    st.subheader("🚫 Inventory with ZERO Business Sales")
+
+                    # Filter: Business Sales Qty == 0
+                    if "Business Sales Qty" in inv.columns:
+                        zero_sales_df = inv[
+                            pd.to_numeric(inv["Business Sales Qty"], errors="coerce").fillna(0) == 0
+                        ].copy()
+                    else:
+                        zero_sales_df = inv.iloc[0:0].copy()
+
+                    st.metric("Zero Sales SKUs", len(zero_sales_df))
+
+                    st.dataframe(zero_sales_df, use_container_width=True, height=500)
+
+                    xlsx_zero = create_excel_with_doc_format(zero_sales_df)
+                    st.download_button(
+                        "📥 Download Zero Business Sales Inventory (Excel)",
+                        data=xlsx_zero,
+                        file_name=f"inventory_zero_sales_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+                    st.markdown("---")
+
+                    st.subheader("Inventory OOS / Overstock Export")
+
+                    colO1, colO2 = st.columns(2)
+
+                    with colO1:
+                        df_oos = inv[inv.get("afn-warehouse-quantity", 0) == 0]
+                        buf_oos = create_excel_with_doc_format(df_oos)
+
+                        st.download_button(
+                            label="📥 Download Inventory OOS Excel",
+                            data=buf_oos,
+                            file_name="inventory_oos.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="inv_oos_download"
+                        )
+
+
+                    with colO2:
+                        df_over = inv.sort_values("As per Qty", ascending=False)
+                        buf_over = create_excel_with_doc_format(df_over)
+
+                        st.download_button(
+                            label="📥 Download Inventory Overstock Excel",
+                            data=buf_over,
+                            file_name="inventory_overstock.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="inv_over_download"
+                        )
 
             except Exception as e:
                 st.error("❌ Processing failed.")
