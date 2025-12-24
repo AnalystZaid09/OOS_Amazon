@@ -578,11 +578,12 @@ with st.sidebar:
 st.header("📁 Upload Files")
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    business_file = st.file_uploader("Upload Business Report CSV", type=["csv"], key="business")
+    business_file = st.file_uploader("Upload Business Report CSV/Excel", type=["csv","xlsx"], key="business")
 with col2:
     pm_file = st.file_uploader("Upload PM Excel/CSV", type=["xlsx", "csv"], key="pm")
 with col3:
-    inventory_file = st.file_uploader("Upload Manage Inventory CSV", type=["csv"], key="inventory")
+    inventory_file = st.file_uploader("Upload Manage Inventory CSV/Excel", type=["csv","xlsx], key="inventory")
+    
 with col4:
     inventory_listing_file = st.file_uploader(
         "Upload Inactive Listing Report",
@@ -1289,3 +1290,4 @@ elif "processed_data" in st.session_state:
 # footer
 st.markdown("---")
 st.markdown("<div style='text-align: center; color: #666; padding: 10px;'>Inventory Analysis Dashboard | Built with Streamlit</div>", unsafe_allow_html=True)
+
