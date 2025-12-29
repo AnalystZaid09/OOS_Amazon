@@ -631,8 +631,15 @@ if st.button("🚀 Process Data"):
 
                 inventory = pd.read_csv(inventory_file)
                 inventory.columns = inventory.columns.str.strip()
-                inventory.iloc[:, 0] = inventory.iloc[:, 0].astype(str)
-                
+                # 2) Rename inventory key column 'asin' → 'ASIN'
+                if "asin" in inventory.columns:
+                    inventory.rename(columns={"asin": "ASIN"}, inplace=True)
+                else:
+                    inventory.rename(columns={inventory.columns[0]: "ASIN"}, inplace=True, errors="ignore")
+
+                # 3) Convert ASIN to string for safe joins
+                inventory["ASIN"] = inventory["ASIN"].astype(str)
+
                 # -------------------------
                 # Inventory Report creation
                 # -------------------------
@@ -657,34 +664,62 @@ if st.button("🚀 Process Data"):
                 # -------------------------
                 # PM cleanup + merge (SAFE – no duplicates)
                 # -------------------------
-                pm = pm_read.iloc[:, 2:7].copy()
-                pm.columns = ["Amazon Sku Name", "D", "Brand Manager", "F", "Brand"]
+                # ---------------- PM MERGE (ASIN BASED) ----------------
+                pm = pm_read.copy()
 
-                pm["Amazon Sku Name"] = pm["Amazon Sku Name"].astype(str)
+                # Strip spaces from column names
+                pm.columns = pm.columns.str.strip()
 
-                # # CRITICAL: ensure one row per SKU
-                # pm = (
-                #     pm
-                #     .dropna(subset=["Amazon Sku Name"])
-                #     .drop_duplicates(subset=["Amazon Sku Name"], keep="first")
-                # )
+                # Ensure ASIN column exists in PM file
+                if "ASIN" not in pm.columns:
+                    st.error("❌ PM file is invalid. Required column missing: ASIN")
+                    st.stop()
 
-                # SINGLE merge instead of two
-                original = original.merge(
-                    pm[["Amazon Sku Name", "Brand Manager", "Brand"]],
-                    how="left",
-                    left_on="SKU",
-                    right_on="Amazon Sku Name"
+                # Prepare lookup (1 row per ASIN)
+                pm_lookup = (
+                    pm[["ASIN", "Brand Manager", "Brand", "CP", "Vendor SKU Codes"]]
+                    .drop_duplicates(subset=["ASIN"], keep="first")
+                    .copy()
                 )
 
-                # reposition columns (optional – your existing logic)
-                if "Title" in original.columns:
-                    for col_name in ["Brand Manager", "Brand"]:
-                        if col_name in original.columns:
-                            col = original.pop(col_name)
-                            insert_pos = original.columns.get_loc("Title")
-                            original.insert(insert_pos, col_name, col)
+                # Convert ASIN to string for safe joins
+                pm_lookup["ASIN"] = pm_lookup["ASIN"].astype(str)
+                pm_lookup["CP"] = pd.to_numeric(pm_lookup["CP"], errors="coerce").fillna(0)
 
+                # Convert Business file key to string
+                original["SKU"] = original["SKU"].astype(str)
+                original["(Parent) ASIN"] = original["(Parent) ASIN"].astype(str)
+
+                # Merge PM into Business using (Parent) ASIN = ASIN
+                original = original.merge(
+                    pm_lookup,
+                    how="left",
+                    left_on="(Parent) ASIN",
+                    right_on="ASIN"
+                )
+
+                # Rename Vendor SKU column after merge
+                original.rename(columns={"Vendor SKU Codes": "Vendor SKU"}, inplace=True)
+
+                # Remove extra ASIN column from PM (if created during join)
+                original.drop(columns=["ASIN"], inplace=True, errors="ignore")
+                
+                # ---- FIX CP LOOKUP FOR BUSINESS REPORT (ASIN BASED, UNIQUE INDEX SAFE) ----
+                pm_biz = pm_read.copy()
+                pm_biz.columns = pm_biz.columns.str.strip().str.upper()
+
+                if "CP" not in pm_biz.columns:
+                    pm_biz["CP"] = 0
+
+                pm_biz["ASIN"] = pm_biz["ASIN"].astype(str)
+                pm_biz["CP"] = pd.to_numeric(pm_biz["CP"], errors="coerce").fillna(0)
+
+                # Make CP unique per ASIN using SUM
+                pm_cp_unique = pm_biz.groupby("ASIN", dropna=False)["CP"].sum().reset_index()
+                pm_cp_map = pm_cp_unique.set_index("ASIN")["CP"]  # unique index guaranteed
+
+                # Overwrite Business CP with PM CP
+                original["CP"] = original["(Parent) ASIN"].map(pm_cp_map).fillna(0)
 
                 # inventory mapping
                 # ---------- SAFE afn-fulfillable-quantity detection ----------
@@ -692,29 +727,39 @@ if st.button("🚀 Process Data"):
                     (c for c in inventory.columns if "afn-fulfillable" in c.lower()),
                     None
                 )
+                asin_key = "ASIN"
 
-                if fulfillable_col:
-                    mi_map = inventory.set_index(inventory.columns[0])[fulfillable_col]
-                    original["afn-fulfillable-quantity"] = (
-                        original["SKU"].map(mi_map).fillna(0)
-                    )
-                else:
-                    original["afn-fulfillable-quantity"] = 0
+                # Make ASIN unique by aggregating inventory qty
+                inventory_unique = inventory.groupby(asin_key, dropna=False)[fulfillable_col].sum().reset_index()
+                inventory_unique[asin_key] = inventory_unique[asin_key].astype(str)
 
+                # Create lookup dict/series with unique index
+                inv_map = inventory_unique.set_index(asin_key)[fulfillable_col]
+
+                # Now map safely
+                original["afn-fulfillable-quantity"] = (
+                    original["(Parent) ASIN"]
+                    .map(inv_map)
+                    .fillna(0)
+                    .astype(int)
+                )
 
                 reserved_col = next(
                     (c for c in inventory.columns if "afn-reserved" in c.lower()),
                     None
                 )
 
-                if reserved_col:
-                    mi_res_map = inventory.set_index(inventory.columns[0])[reserved_col]
-                    original["afn-reserved-quantity"] = (
-                        original["SKU"].map(mi_res_map).fillna(0)
-                    )
-                else:
-                    original["afn-reserved-quantity"] = 0
+                inventory_res_unique = inventory.groupby(asin_key, dropna=False)[reserved_col].sum().reset_index()
+                inventory_res_unique[asin_key] = inventory_res_unique[asin_key].astype(str)
 
+                res_map = inventory_res_unique.set_index(asin_key)[reserved_col]
+
+                original["afn-reserved-quantity"] = (
+                    original["(Parent) ASIN"]
+                    .map(res_map)
+                    .fillna(0)
+                    .astype(int)
+                )
 
                 # clean & compute DRR/DOC
                 # -------------------------
@@ -785,10 +830,21 @@ if st.button("🚀 Process Data"):
                         columns={"Vendor SKU Codes": "Vendor SKU"},
                         inplace=True
                     )
+                    
+                    original["afn-fulfillable-quantity"] = pd.to_numeric(original["afn-fulfillable-quantity"], errors="coerce").fillna(0)
 
-                    original["Total CP"] = (
-                        original["afn-fulfillable-quantity"].fillna(0) * original["CP"]
-                    ).round(2)
+                    # Remove incorrect CP column
+                    original.drop(columns=["CP"], inplace=True, errors="ignore")
+
+                    # Rename CP_y → CP (correct column)
+                    if "CP_y" in original.columns:
+                        original.rename(columns={"CP_y": "CP"}, inplace=True)
+
+                    # Ensure CP is numeric and safe
+                    original["CP"] = pd.to_numeric(original["CP"], errors="coerce").fillna(0).round(2)
+
+                    # Now calculate Total CP using correct CP column
+                    original["Total CP"] = (original["afn-fulfillable-quantity"] * original["CP"]).round(2)
 
                     original.drop(columns=["ASIN"], inplace=True, errors="ignore")
 
@@ -805,7 +861,6 @@ if st.button("🚀 Process Data"):
                         subset=["(Parent) ASIN", "SKU"],
                         keep="first"
                     )
-
 
                 # -------------------------
                 # Seller SKU mapping (EXACT Excel VLOOKUP equivalent)
@@ -847,7 +902,7 @@ if st.button("🚀 Process Data"):
                 # -------------------------
                 pivot_df = (
                     original
-                    .groupby("SKU", dropna=False)["Total Orders"]
+                    .groupby("(Parent) ASIN", dropna=False)["Total Orders"]
                     .sum()
                     .reset_index()
                     .sort_values("Total Orders", ascending=False)
@@ -865,26 +920,26 @@ if st.button("🚀 Process Data"):
                         break
 
                 # Build lookup dictionary from pivot_df
+                # ---------------- SALES LOOKUP (ASIN BASED) ----------------
                 sales_lookup = (
                     pivot_df
-                    .drop_duplicates(subset=["SKU"])
-                    .set_index("SKU")["Total Orders"]
+                    .set_index("(Parent) ASIN")["Total Orders"]
                     .to_dict()
                 )
 
-                # Apply VLOOKUP-style mapping
-                if inv_sku_col:
-                    inventory_report_df[inv_sku_col] = inventory_report_df[inv_sku_col].astype(str)
+                # Apply VLOOKUP-style mapping using PM/Inventory ASIN
+                if "ASIN" in inventory_report_df.columns:
+                    inventory_report_df["ASIN"] = inventory_report_df["ASIN"].astype(str)
 
                     inventory_report_df["Business Sales Qty"] = (
-                        inventory_report_df[inv_sku_col]
+                        inventory_report_df["ASIN"]
                         .map(sales_lookup)
                         .fillna(0)
                         .astype(int)
                     )
                 else:
                     inventory_report_df["Business Sales Qty"] = 0
-                    
+       
                 inventory_report_df["DRR"] = (
                     inventory_report_df["Business Sales Qty"] / no_of_days
                 ).round(2)
@@ -942,6 +997,12 @@ if st.button("🚀 Process Data"):
                     ]
                     display_cols = [col for col in display_cols if col in original.columns]
                     display_df = original[display_cols].copy()
+                    
+                    # --- FIX FOR NON-UNIQUE INDEX / DUPLICATE COLUMNS ---
+                    display_df.reset_index(drop=True, inplace=True)
+                    display_df = display_df.loc[:, ~display_df.columns.duplicated()].copy()
+                    display_df["DOC"] = pd.to_numeric(display_df["DOC"], errors="coerce").fillna(0)
+
                     styled_df = display_df.style.map(color_doc, subset=["DOC"])
 
                     st.dataframe(styled_df, use_container_width=True, height=600)
@@ -1188,6 +1249,11 @@ elif "processed_data" in st.session_state:
     ]
     display_cols = [col for col in display_cols if col in orig.columns]
     display_df = orig[display_cols].copy()
+    
+    # 🔥 ADD THIS:
+    display_df.reset_index(drop=True, inplace=True)  # fresh unique index
+    display_df = display_df.loc[:, ~display_df.columns.duplicated()].copy()  # unique columns only
+        
     styled_df = display_df.style.map(color_doc, subset=["DOC"])
     st.dataframe(styled_df, use_container_width=True, height=600)
 
@@ -1290,5 +1356,3 @@ elif "processed_data" in st.session_state:
 # footer
 st.markdown("---")
 st.markdown("<div style='text-align: center; color: #666; padding: 10px;'>Inventory Analysis Dashboard | Built with Streamlit</div>", unsafe_allow_html=True)
-
-
