@@ -570,8 +570,8 @@ with st.sidebar:
     )
     st.info(
         """
-- DRR (Daily Run Rate) = Total Orders ÷ Days
-- DOC (Days of Coverage) = afn-fulfillable-quantity ÷ DRR
+- DRR = Total Orders ÷ Days
+- DOC = Total Stock ÷ DRR
 """
     )
 
@@ -590,7 +590,6 @@ with col4:
         type=["csv", "xlsx"],
         key="inventory_listing"
     )
-
 
 st.markdown("---")
 
@@ -798,17 +797,19 @@ if st.button("🚀 Process Data"):
                 original["Total Orders"] = (
                     original["Total Order Items"] + original["Total Order Items - B2B"]
                 )
+                original["afn-fulfillable-quantity"] = pd.to_numeric(original["afn-fulfillable-quantity"], errors="coerce")
 
+                original["Total Stock"] = (
+                    original["afn-fulfillable-quantity"] + original["afn-reserved-quantity"]
+                )
 
                 original["DRR"] = (original["Total Orders"] / no_of_days).round(2)
-                original["afn-fulfillable-quantity"] = pd.to_numeric(original["afn-fulfillable-quantity"], errors="coerce")
                 original["DOC"] = (
-                    original["afn-fulfillable-quantity"] /
+                    original["Total Stock"] /
                     original["DRR"].replace(0, pd.NA)
                 ).round(2)
 
                 original["DOC"] = original["DOC"].fillna(0)
-
 
                 # -------------------------
                 # REAL Vendor SKU, CP, Total CP (NO EXCEL FORMULA)
@@ -960,18 +961,21 @@ if st.button("🚀 Process Data"):
                     inventory_report_df["Business Sales Qty"] / no_of_days
                 ).round(2)
 
-                warehouse_col = next(
-                    (c for c in inventory_report_df.columns if "afn-warehouse" in c.lower()),
-                    None
+                inventory_report_df['afn-fulfillable-quantity'] = pd.to_numeric(
+                    inventory_report_df['afn-fulfillable-quantity'], errors="coerce"
                 )
-                if warehouse_col:
-                    inventory_report_df["DOC"] = (
-                        inventory_report_df[warehouse_col] /
+                inventory_report_df['afn-reserved-quantity'] = pd.to_numeric(
+                    inventory_report_df['afn-reserved-quantity'], errors="coerce"
+                )
+
+                inventory_report_df["Total Stock"] = (
+                    inventory_report_df["afn-fulfillable-quantity"] + inventory_report_df["afn-reserved-quantity"]
+                )
+
+                inventory_report_df["DOC"] = (
+                        inventory_report_df["Total Stock"] /
                         inventory_report_df["DRR"].replace(0, pd.NA)
                     ).fillna(0)
-                else:
-                    inventory_report_df["DOC"] = 0
-
 
                 st.session_state["sku_pivot"] = pivot_df
                 
@@ -1004,6 +1008,7 @@ if st.button("🚀 Process Data"):
                         "Total Orders",
                         "afn-fulfillable-quantity",
                         "afn-reserved-quantity",
+                        "Total Stock",
                         "DRR",
                         "DOC",
                         "Vendor SKU",
@@ -1257,6 +1262,7 @@ elif "processed_data" in st.session_state:
         "Total Orders",
         "afn-fulfillable-quantity",
         "afn-reserved-quantity",
+        "Total Stock",
         "DRR",
         "DOC",
         "Vendor SKU",
