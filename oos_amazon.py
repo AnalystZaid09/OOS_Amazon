@@ -628,6 +628,29 @@ if st.button("🚀 Process Data"):
                     pm_read= pd.read_excel(pm_file)
                 else:
                     pm_read = pd.read_csv(pm_file)
+                    
+                
+                # -------- PRODUCT NAME MAPPING (PM ASIN → Business Parent ASIN) --------
+                pm_read.columns = pm_read.columns.str.strip()
+
+                # Ensure ASIN exists
+                if "ASIN" not in pm_read.columns:
+                    st.error("❌ PM file must contain an ASIN column!")
+                    st.stop()
+
+                # Detect product name column safely
+                product_col = next(
+                    (c for c in pm_read.columns if "title" in c.lower() or "product name" in c.lower() or "item" in c.lower()),
+                    None
+                )
+
+                if not product_col:
+                    st.warning("⚠️ No product name/title column found in PM file — mapping skipped")
+                    original["Product Name"] = ""
+                else:
+                    pm_product_map = pm_read.set_index("ASIN")[product_col].to_dict()
+                    original["Product Name"] = original["(Parent) ASIN"].map(pm_product_map).fillna("")
+                # ---------------------------------------------------------------
 
                 inventory = pd.read_csv(inventory_file)
                 inventory.columns = inventory.columns.str.strip()
@@ -722,44 +745,37 @@ if st.button("🚀 Process Data"):
                 original["CP"] = original["(Parent) ASIN"].map(pm_cp_map).fillna(0)
 
                 # inventory mapping
-                # ---------- SAFE afn-fulfillable-quantity detection ----------
-                fulfillable_col = next(
-                    (c for c in inventory.columns if "afn-fulfillable" in c.lower()),
-                    None
-                )
-                asin_key = "ASIN"
+                # -------- SKU BASED REMAPPING (Only for 2 columns) --------
+                inventory.columns = inventory.columns.str.strip()
 
-                # Make ASIN unique by aggregating inventory qty
-                inventory_unique = inventory.groupby(asin_key, dropna=False)[fulfillable_col].sum().reset_index()
-                inventory_unique[asin_key] = inventory_unique[asin_key].astype(str)
+                # SKU column detect (Manage Inventory file)
+                inv_sku_col = next((c for c in inventory.columns if "sku" in c.lower()), None)
 
-                # Create lookup dict/series with unique index
-                inv_map = inventory_unique.set_index(asin_key)[fulfillable_col]
+                if not inv_sku_col:
+                    st.error("❌ Manage Inventory file me SKU column nahi mila!")
+                    st.stop()
 
-                # Now map safely
-                original["afn-fulfillable-quantity"] = (
-                    original["(Parent) ASIN"]
-                    .map(inv_map)
-                    .fillna(0)
-                    .astype(int)
-                )
+                # Qty columns detect
+                fulfillable_qty_col = next((c for c in inventory.columns if "afn-fulfillable-quantity" in c.lower()), None)
+                reserved_qty_col = next((c for c in inventory.columns if "afn-reserved-quantity" in c.lower()), None)
 
-                reserved_col = next(
-                    (c for c in inventory.columns if "afn-reserved" in c.lower()),
-                    None
-                )
+                if not fulfillable_qty_col or not reserved_qty_col:
+                    st.error("❌ Manage Inventory file me afn-fulfillable aur afn-reserved quantity columns nahi mile!")
+                    st.stop()
 
-                inventory_res_unique = inventory.groupby(asin_key, dropna=False)[reserved_col].sum().reset_index()
-                inventory_res_unique[asin_key] = inventory_res_unique[asin_key].astype(str)
+                # Make SKU unique by SUM
+                inv_unique = inventory.groupby(inv_sku_col, dropna=False)[fulfillable_qty_col].sum()
+                res_unique = inventory.groupby(inv_sku_col, dropna=False)[reserved_qty_col].sum()
 
-                res_map = inventory_res_unique.set_index(asin_key)[reserved_col]
+                # Convert SKU to string for lookup
+                original["SKU"] = original["SKU"].astype(str)
+                inv_unique.index = inv_unique.index.astype(str)
+                res_unique.index = res_unique.index.astype(str)
 
-                original["afn-reserved-quantity"] = (
-                    original["(Parent) ASIN"]
-                    .map(res_map)
-                    .fillna(0)
-                    .astype(int)
-                )
+                # Map only 2 columns
+                original["afn-fulfillable-quantity"] = original["SKU"].map(inv_unique).fillna(0).astype(int)
+                original["afn-reserved-quantity"] = original["SKU"].map(res_unique).fillna(0).astype(int)
+                # ----------------------------------------------------------
 
                 # clean & compute DRR/DOC
                 # -------------------------
@@ -981,6 +997,7 @@ if st.button("🚀 Process Data"):
                         "Brand Manager",
                         "SKU",
                         "Title",
+                        "Product Name",
                         "Units Ordered",
                         "Total Order Items",
                         "Total Order Items - B2B",
@@ -1233,6 +1250,7 @@ elif "processed_data" in st.session_state:
         "Brand Manager",
         "SKU",
         "Title",
+        "Product Name",
         "Units Ordered",
         "Total Order Items",
         "Total Order Items - B2B",
