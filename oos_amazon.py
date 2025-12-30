@@ -98,6 +98,24 @@ def create_excel_with_doc_format(df: pd.DataFrame) -> bytes:
     ws.append(header)
     for row in df.itertuples(index=False, name=None):
         ws.append(list(row))
+        
+    # Force cleanup + numeric + Indian number formatting
+    target_cols = ["Ordered Product Sales", "Ordered Product Sales - B2B"]
+    header = [cell.value for cell in ws[1]]
+
+    for col_name in target_cols:
+        if col_name in header:
+            col_idx = header.index(col_name) + 1
+            for row in range(2, ws.max_row + 1):
+                cell = ws.cell(row=row, column=col_idx)
+                try:
+                    # Remove ₹ if present and enforce numeric
+                    val = str(cell.value).replace("₹", "").replace(",", "")
+                    cell.value = float(val)
+                    cell.number_format = "#,##0.00"  # Indian comma style number
+                except:
+                    cell.value = 0
+                    cell.number_format = "#,##0.00"
 
     # Find DOC column index (case-insensitive contains 'doc')
     header_row = [cell.value for cell in ws[1]]
@@ -1020,6 +1038,17 @@ if st.button("🚀 Process Data"):
                     display_cols = [col for col in display_cols if col in original.columns]
                     display_df = original[display_cols].copy()
                     
+                    # 💰 FIXED currency cleanup
+                    sales_cols = ["Ordered Product Sales", "Ordered Product Sales - B2B"]
+                    for col in sales_cols:
+                        if col in display_df.columns:
+                            display_df[col] = pd.to_numeric(
+                                display_df[col].astype(str)
+                                .str.replace("₹", "", regex=False)
+                                .str.replace(",", "", regex=False),
+                                errors="coerce"
+                            ).fillna(0).round(2)
+                                        
                     # --- FIX FOR NON-UNIQUE INDEX / DUPLICATE COLUMNS ---
                     display_df.reset_index(drop=True, inplace=True)
                     display_df = display_df.loc[:, ~display_df.columns.duplicated()].copy()
@@ -1274,6 +1303,17 @@ elif "processed_data" in st.session_state:
     display_cols = [col for col in display_cols if col in orig.columns]
     display_df = orig[display_cols].copy()
     
+    # 💰 FIXED currency cleanup
+    sales_cols = ["Ordered Product Sales", "Ordered Product Sales - B2B"]
+    for col in sales_cols:
+        if col in display_df.columns:
+            display_df[col] = pd.to_numeric(
+                display_df[col].astype(str)
+                .str.replace("₹", "", regex=False)
+                .str.replace(",", "", regex=False),
+                errors="coerce"
+            ).fillna(0).round(2)
+
     # 🔥 ADD THIS:
     display_df.reset_index(drop=True, inplace=True)  # fresh unique index
     display_df = display_df.loc[:, ~display_df.columns.duplicated()].copy()  # unique columns only
