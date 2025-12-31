@@ -1088,24 +1088,28 @@ if st.button("🚀 Process Data"):
                         
                         # 1. Selection settings (Always visible)
                         brands = sorted(original["Brand"].dropna().astype(str).unique().tolist()) if "Brand" in original.columns else []
-                        selected_export = st.multiselect("Filter brands for export", options=brands, default=brands, key="exp_brands")
+                        # Removed brand filter UI
+                        # selected_export = st.multiselect("Filter brands for export", options=brands, default=brands, key="exp_brands")
                         
                         # 2. Logic Choice (Using a selectbox ensures the download button stays visible)
-                        export_choice = st.selectbox("Choose Export Type", ["-- Select --", "Overstock (DOC >= 90)", "OOS (Qty = 0)"])
+                        # export_choice = st.selectbox("Choose Export Type", ["-- Select --", "Overstock (DOC >= 90)", "OOS (Qty = 0)"])
+                        # Replace selectbox with direct buttons
+                        col_btn1, col_btn2 = st.columns(2)
+                        with col_btn1:
+                            overstock_btn = st.button("📥 Download Overstock (DOC ≥ 90)")
+                        with col_btn2:
+                            oos_btn = st.button("📥 Download OOS (Qty = 0)")
 
-                        if export_choice != "-- Select --":
-                            sort_desc = True if "Overstock" in export_choice else False
-                            
+                        if overstock_btn or oos_btn :
+                            sort_desc = True if overstock_btn else False
+                            export_choice = "Overstock (DOC >= 90)" if sort_desc else "OOS (Qty = 0)"
+                            st.info(f"Preparing **{export_choice}** export...")
                             # Filter the dataframe based on choice
                             if sort_desc:
                                 df_export = filter_overstock(original)
                             else:
                                 df_export = filter_oos(original)
-                            
-                            # Apply brand filters
-                            if selected_export:
-                                df_export = df_export[df_export["Brand"].isin(selected_export)].copy()
-                            
+                                                        
                             df_export = df_export.sort_values(by="DOC", ascending=(not sort_desc)).reset_index(drop=True)
 
                             # Template Detection logic
